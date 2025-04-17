@@ -5,18 +5,17 @@ import seaborn as sns
 from pathlib import Path
 from scipy.stats import t, norm
 import os
-
-# ================== PATHS ==================
-THROUGHPUT_CSV = "benchmark_results.csv"
-RESOURCE_CSV = "resource_profile.csv"
-BASELINE_LATENCY_CSV = "baseline_latency.csv"
-
-OUTPUT_IMG_THROUGHPUT = "throughput_plot.png"
-OUTPUT_IMG_LATENCY = "latency_plot.png"
-OUTPUT_IMG_CPU = "cpu_plot.png"
-OUTPUT_IMG_MEM = "memory_plot.png"
-OUTPUT_IMG_BASELINE_LATENCY = "baseline_latency_plot.png"
-OUTPUT_IMG_COMBINED_LATENCY = "combined_latency_plot.png"
+from paths import (
+    THROUGHPUT_CSV,
+    BASELINE_LATENCY_CSV,
+    RESOURCE_PROFILE_CSV,
+    OUTPUT_IMG_THROUGHPUT,
+    OUTPUT_IMG_LATENCY,
+    OUTPUT_IMG_CPU,
+    OUTPUT_IMG_MEM,
+    OUTPUT_IMG_BASELINE_LATENCY,
+    OUTPUT_IMG_COMBINED_LATENCY
+)
 
 
 # ================== ANALYSIS SETTINGS ==================
@@ -181,11 +180,11 @@ def main():
     else:
         print(f"Baseline latency file '{BASELINE_LATENCY_CSV}' not found.")
         
-    if os.path.exists(RESOURCE_CSV):
-        resource_df = pd.read_csv(RESOURCE_CSV)
+    if os.path.exists(RESOURCE_PROFILE_CSV):
+        resource_df = pd.read_csv(RESOURCE_PROFILE_CSV)
         plot_resource_usage(resource_df)
     else:
-        print(f"Resource usage file '{RESOURCE_CSV}' not found.")
+        print(f"Resource usage file '{RESOURCE_PROFILE_CSV}' not found.")
 
 
 if __name__ == "__main__":
