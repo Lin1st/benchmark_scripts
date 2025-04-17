@@ -9,12 +9,15 @@ from paths import (
     THROUGHPUT_CSV,
     BASELINE_LATENCY_CSV,
     RESOURCE_PROFILE_CSV,
+    RESOURCE_VS_RPS_CSV,
     OUTPUT_IMG_THROUGHPUT,
     OUTPUT_IMG_LATENCY,
     OUTPUT_IMG_CPU,
     OUTPUT_IMG_MEM,
     OUTPUT_IMG_BASELINE_LATENCY,
-    OUTPUT_IMG_COMBINED_LATENCY
+    OUTPUT_IMG_COMBINED_LATENCY,
+    OUTPUT_IMG_RESOURCE_CPU_RPS,
+    OUTPUT_IMG_RESOURCE_MEM_RPS,
 )
 
 
@@ -52,16 +55,16 @@ def summarize(df, value_col, conf_level, method):
     return summary
 
 
-def plot_with_ci_grouped(summary_df, group_cols, y_label, title, output_file, y_log_scale=False):
+def plot_with_ci_grouped(summary_df, group_cols, x_col, y_label, title, output_file, y_log_scale=False):
     plt.figure(figsize=(10, 6))
     sns.set(style="whitegrid")
 
     for group_keys, sub_df in summary_df.groupby(group_cols):
         label = group_keys if isinstance(group_keys, str) else " | ".join(str(k) for k in group_keys)
-        linestyle = "dashed" if "baseline" in label.lower() else "solid"
+        linestyle = "dashed" if "0b" in label.lower() or "baseline" in label.lower() else "solid"
 
         plt.errorbar(
-            sub_df["payload_size"],
+            sub_df[x_col],
             sub_df["mean_val"],
             yerr=sub_df["ci"],
             label=label,
@@ -70,7 +73,7 @@ def plot_with_ci_grouped(summary_df, group_cols, y_label, title, output_file, y_
             linestyle=linestyle
         )
 
-    plt.xlabel("Payload Size (bytes)")
+    plt.xlabel(x_col.replace("_", " ").title())
     plt.ylabel(y_label)
     plt.title(title)
     if y_log_scale:
@@ -81,6 +84,7 @@ def plot_with_ci_grouped(summary_df, group_cols, y_label, title, output_file, y_
     plt.close()
 
 
+
 # ================== PLOTS ==================
 # Throughput (under stress)
 def plot_throughput(df):
@@ -88,6 +92,7 @@ def plot_throughput(df):
     plot_with_ci_grouped(
         throughput_summary,
         group_cols=["scenario"],
+        x_col="payload_size",
         y_label="Throughput (requests/sec)",
         title="Throughput vs Payload Size",
         output_file=OUTPUT_IMG_THROUGHPUT
@@ -100,6 +105,7 @@ def plot_latency_under_stress(df):
     plot_with_ci_grouped(
         latency_summary,
         group_cols=["scenario"],
+        x_col="payload_size",
         y_label="Average Latency (ms)",
         title="Latency vs Payload Size",
         output_file=OUTPUT_IMG_LATENCY
@@ -121,6 +127,7 @@ def plot_baseline_and_combined(baseline_df, stress_df):
     plot_with_ci_grouped(
         baseline_summary,
         group_cols=["scenario"],
+        x_col="payload_size",
         y_label="Baseline Latency (ms)",
         title="Baseline Latency vs Payload Size",
         output_file=OUTPUT_IMG_BASELINE_LATENCY
@@ -141,6 +148,7 @@ def plot_baseline_and_combined(baseline_df, stress_df):
     plot_with_ci_grouped(
         combined_summary,
         group_cols=["scenario", "condition"],
+        x_col="payload_size",
         y_label="Latency (ms)",
         title="Latency: Baseline vs Under Stress",
         output_file=OUTPUT_IMG_COMBINED_LATENCY
@@ -153,6 +161,7 @@ def plot_resource_usage(resource_df):
     plot_with_ci_grouped(
         cpu_summary,
         group_cols=["scenario"],
+        x_col="payload_size",
         y_label="CPU Usage (%)",
         title="CPU Usage vs Payload Size",
         output_file=OUTPUT_IMG_CPU
@@ -162,10 +171,39 @@ def plot_resource_usage(resource_df):
     plot_with_ci_grouped(
         mem_summary,
         group_cols=["scenario"],
+        x_col="payload_size",
         y_label="Memory Usage (MB)",
         title="Memory Usage vs Payload Size",
         output_file=OUTPUT_IMG_MEM
     )
+
+
+def plot_resource_vs_rps(resource_vs_rps_df):
+    for metric, y_label, output_file in [
+        ("cpu_percent", "CPU Usage (%)", OUTPUT_IMG_RESOURCE_CPU_RPS),
+        ("memory_mb", "Memory Usage (MB)", OUTPUT_IMG_RESOURCE_MEM_RPS)
+    ]:
+        summary = resource_vs_rps_df.groupby(
+            ["scenario", "payload_size", "qps"]
+        ).agg(
+            mean_val=(metric, "mean"),
+            std_val=(metric, "std"),
+            count=(metric, "count")
+        ).reset_index()
+
+        summary["ci"] = summary.apply(
+            lambda row: compute_confidence_interval(row["std_val"], row["count"], CONF_LEVEL, CI_METHOD),
+            axis=1
+        )
+
+        plot_with_ci_grouped(
+            summary,
+            group_cols=["scenario", "payload_size"],
+            x_col="qps",
+            y_label=y_label,
+            title=f"{y_label} vs RPS",
+            output_file=output_file
+        )
 
 
 # ========================= MAIN =========================
@@ -185,6 +223,12 @@ def main():
         plot_resource_usage(resource_df)
     else:
         print(f"Resource usage file '{RESOURCE_PROFILE_CSV}' not found.")
+
+    if os.path.exists(RESOURCE_VS_RPS_CSV):
+        resource_vs_rps_df = pd.read_csv(RESOURCE_VS_RPS_CSV)
+        plot_resource_vs_rps(resource_vs_rps_df)
+    else:
+        print(f"Resource vs RPS file '{RESOURCE_VS_RPS_CSV}' not found.")
 
 
 if __name__ == "__main__":
