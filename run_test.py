@@ -8,6 +8,7 @@ import socket
 import uuid
 from pathlib import Path
 from threading import Thread, Event as ThreadEvent
+import tempfile
 from paths import (
     WASMCLOUD_NATS,
     WASMCLOUD_BYPASS,
@@ -15,13 +16,16 @@ from paths import (
     THROUGHPUT_CSV,
     BASELINE_LATENCY_CSV,
     RESOURCE_PROFILE_CSV,
+    RESOURCE_VS_RPS_CSV,
     BENCH_DIR_TEMPLATE,
-    HEY_DEBUG_LOG
+    HEY_DEBUG_LOG,
+    VEGETA_DEBUG_LOG,
 )
 
 
 # Benchmark settings
 PAYLOAD_SIZES = [0, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+PAYLOAD_SIZES = [0, 512]
 RUNS_PER_SIZE = 5
 BASELINE_LATENCY_RUNS = 5
 HEY_DURATION = "1s"
@@ -138,9 +142,12 @@ def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=HEY_CONCU
     return parse_hey_output(result.stdout)
 
 
-def run_hey_with_rate(scenario=None, payload_size=None, run_id=None, qps=50, concurrency=1, duration="10s", wait=True):
+def run_hey_with_rate(scenario=None, payload_size=None, run_id=None, qps=50, duration="10s", wait=True):
+    #cmd = [
+    #    "hey", "-z", duration, "-q", str(qps), "-c", str(concurrency), "http://localhost:8000"
+    #]
     cmd = [
-        "hey", "-z", duration, "-q", str(qps), "-c", str(concurrency), "http://localhost:8000"
+        "hey", "-z", duration, "-q", str(qps), "http://localhost:8000"
     ]
 
     if wait:
@@ -157,6 +164,43 @@ def run_hey_with_rate(scenario=None, payload_size=None, run_id=None, qps=50, con
         return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
+def run_vegeta(scenario=None, payload_size=None, run_id=None, rate=50, duration="10s"):
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        attack_path = tmp.name
+
+    try:
+        # Save binary output from attack
+        attack_cmd = f"echo 'GET http://localhost:8000' | vegeta attack -rate={rate} -duration={duration} -output={attack_path}"
+        attack_result = subprocess.run(attack_cmd, shell=True, capture_output=True, text=True)
+
+        if attack_result.returncode != 0:
+            print("Vegeta attack failed:", attack_result.stderr)
+            return None
+
+        # Read report from binary file
+        report_result = subprocess.run(
+            ["vegeta", "report", attack_path],
+            capture_output=True,
+            text=True
+        )
+
+        if report_result.returncode != 0:
+            print("Vegeta report failed:", report_result.stderr)
+            return None
+
+        report_output = report_result.stdout
+
+        with open(VEGETA_DEBUG_LOG, "a") as f:
+            f.write(f"\n===== [VEGETA] Scenario={scenario}, Payload={payload_size}, Run={run_id} =====\n")
+            f.write(report_output)
+
+        return parse_vegeta_output(report_output)
+
+    finally:
+        if os.path.exists(attack_path):
+            os.remove(attack_path)
+
+
 def parse_hey_output(output):
     rps = latency = None
     for line in output.splitlines():
@@ -168,6 +212,18 @@ def parse_hey_output(output):
             except ValueError:
                 latency = None
     return (rps, latency) if rps and latency else (None, None)
+
+
+def parse_vegeta_output(output):
+    rps = None
+    for line in output.splitlines():
+        if "throughput" in line.lower():
+            try:
+                rps = float(line.strip().split(",")[-1])
+                break
+            except Exception:
+                continue
+    return rps
 
 
 def setup_resource_sampling():
@@ -206,38 +262,20 @@ def sample_resource_snapshot(wasm_proc, nats_proc):
     return total_cpu, total_mem_mb
 
 
-def sample_resources(scenario, payload_size, run_id, stop_event):
-    wasm_proc, nats_proc = setup_resource_sampling()
-    time.sleep(RESOURCE_SAMPLE_INTERVAL)
-
-    start = time.time()
-    while not stop_event.is_set():
-        cpu, mem = sample_resource_snapshot(wasm_proc, nats_proc)
-        timestamp = round(time.time() - start, 1)
-
-        write_result(
-            RESOURCE_PROFILE_CSV,
-            ["scenario", "payload_size", "run_id", "timestamp_s", "cpu_percent", "memory_mb"],
-            [scenario, payload_size, run_id, timestamp, cpu, mem]
-        )
-
-        time.sleep(RESOURCE_SAMPLE_INTERVAL)
-
-
-def monitor_and_record_resource_usage(wasmcloud_bin, bench_path, scenario, size, run_id, qps, concurrency, duration, output_csv):
+def monitor_and_record_resource_usage(
+    wasmcloud_bin,
+    bench_path,
+    scenario,
+    size,
+    run_id,
+    qps,
+    duration,
+    output_csv,
+    use_vegeta=False
+):
     start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=False)
     stop_event = ThreadEvent()
     samples = []
-
-    hey_proc = run_hey_with_rate(
-        scenario=scenario,
-        payload_size=size,
-        run_id=run_id,
-        qps=qps,
-        concurrency=concurrency,
-        duration=duration,
-        wait=False
-    )
 
     def sampler():
         try:
@@ -253,24 +291,43 @@ def monitor_and_record_resource_usage(wasmcloud_bin, bench_path, scenario, size,
     monitor_thread = Thread(target=sampler)
     monitor_thread.start()
 
-    stdout, stderr = hey_proc.communicate()
+    rps = None
+    if use_vegeta:
+        rps = run_vegeta(
+            scenario=scenario,
+            payload_size=size,
+            run_id=run_id,
+            rate=qps,
+            duration=duration
+        )
+    else:
+        hey_proc = run_hey_with_rate(
+            scenario=scenario,
+            payload_size=size,
+            run_id=run_id,
+            qps=qps,
+            duration=duration,
+            wait=False
+        )
+        stdout, stderr = hey_proc.communicate()
+        if hey_proc.returncode == 0:
+            rps, _ = parse_hey_output(stdout)
+        else:
+            print(f"Hey failed: {stderr}")
+
     stop_event.set()
     monitor_thread.join()
 
-    if hey_proc.returncode == 0:
-        rps, _ = parse_hey_output(stdout)
-        if samples:
-            avg_cpu = sum(s[0] for s in samples) / len(samples)
-            avg_mem = sum(s[1] for s in samples) / len(samples)
-            write_result(
-                output_csv,
-                ["scenario", "payload_size", "qps", "run_id", "requests_per_sec", "cpu_percent", "memory_mb"],
-                [scenario, size, qps, run_id, rps, avg_cpu, avg_mem]
-            )
-        else:
-            print("No resource samples collected.")
+    if rps and samples:
+        avg_cpu = sum(s[0] for s in samples) / len(samples)
+        avg_mem = sum(s[1] for s in samples) / len(samples)
+        write_result(
+            output_csv,
+            ["scenario", "payload_size", "qps", "run_id", "requests_per_sec", "cpu_percent", "memory_mb"],
+            [scenario, size, qps, run_id, rps, avg_cpu, avg_mem]
+        )
     else:
-        print(f"Hey failed: {stderr}")
+        print("No resource samples collected or RPS unavailable.")
 
     stop_all(scenario)
 
@@ -292,10 +349,12 @@ def benchmark_throughput_latency(scenario, wasmcloud_bin):
             stop_all(scenario)
 
 
-def benchmark_resource_usage(scenario, wasmcloud_bin, qps=100, concurrency=1, duration="5s"):
+def benchmark_resource_usage(scenario, wasmcloud_bin, qps=10, duration="5s"):
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for run_id in range(1, RUNS_PER_SIZE + 1):
+            # Auto-adjust concurrency based on QPS
+            #concurrency = max(1, min(qps // 10, 100))
             print(f"Resource profiling scenario={scenario} size={size} run={run_id}")
             monitor_and_record_resource_usage(
                 wasmcloud_bin=wasmcloud_bin,
@@ -304,13 +363,13 @@ def benchmark_resource_usage(scenario, wasmcloud_bin, qps=100, concurrency=1, du
                 size=size,
                 run_id=run_id,
                 qps=qps,
-                concurrency=concurrency,
+                #concurrency=concurrency,
                 duration=duration,
                 output_csv=RESOURCE_PROFILE_CSV
             )
 
 
-def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=100, duration="5s"):
+def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=10, duration="1s"):
     duration_sec = int(duration.strip("s"))
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
@@ -336,15 +395,38 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=100, duration="5s"):
         stop_all(scenario)
 
 
+def benchmark_resource_vs_rps(scenario, wasmcloud_bin, duration="1s"):
+    sizes = [0, 65536]
+    qps_values = [10, 50]
+
+    for size in sizes:
+        bench_path = BENCH_DIR_TEMPLATE.format(size)
+        for qps in qps_values:
+            for run_id in range(1, RUNS_PER_SIZE + 1):
+                print(f"Resource vs RPS scenario={scenario} size={size} qps={qps} run={run_id}")
+                monitor_and_record_resource_usage(
+                    wasmcloud_bin=wasmcloud_bin,
+                    bench_path=bench_path,
+                    scenario=scenario,
+                    size=size,
+                    run_id=run_id,
+                    qps=qps,
+                    duration=duration,
+                    output_csv=RESOURCE_VS_RPS_CSV,
+                    use_vegeta=True
+                )
+
+
 # ========================= MAIN =========================
 if __name__ == "__main__":
     # Clear existing CSV
-    for f in [THROUGHPUT_CSV, BASELINE_LATENCY_CSV, RESOURCE_PROFILE_CSV, RESOURCE_VS_RPS_CSV, HEY_DEBUG_LOG]:
+    for f in [THROUGHPUT_CSV, BASELINE_LATENCY_CSV, RESOURCE_PROFILE_CSV, RESOURCE_VS_RPS_CSV, HEY_DEBUG_LOG, VEGETA_DEBUG_LOG]:
         if os.path.exists(f):
             os.remove(f)
 
     for scenario, wasmcloud_bin in [("bypass", WASMCLOUD_BYPASS), ("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS)]:
-        benchmark_baseline_latency(scenario, wasmcloud_bin)
-        benchmark_throughput_latency(scenario, wasmcloud_bin)
-        benchmark_resource_usage(scenario, wasmcloud_bin)
+        #benchmark_baseline_latency(scenario, wasmcloud_bin)
+        #benchmark_throughput_latency(scenario, wasmcloud_bin)
+        #benchmark_resource_usage(scenario, wasmcloud_bin)
+        benchmark_resource_vs_rps(scenario, wasmcloud_bin)
 
