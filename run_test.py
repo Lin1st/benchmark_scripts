@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from threading import Thread, Event as ThreadEvent
 import tempfile
+import re
 from paths import (
     WASMCLOUD_NATS,
     WASMCLOUD_BYPASS,
@@ -169,24 +170,20 @@ def run_vegeta(scenario=None, payload_size=None, run_id=None, rate=50, duration=
         attack_path = tmp.name
 
     try:
-        # Save binary output from attack
         attack_cmd = f"echo 'GET http://localhost:8000' | vegeta attack -rate={rate} -duration={duration} -output={attack_path}"
         attack_result = subprocess.run(attack_cmd, shell=True, capture_output=True, text=True)
-
         if attack_result.returncode != 0:
             print("Vegeta attack failed:", attack_result.stderr)
-            return None
+            return None, None
 
-        # Read report from binary file
         report_result = subprocess.run(
             ["vegeta", "report", attack_path],
             capture_output=True,
             text=True
         )
-
         if report_result.returncode != 0:
             print("Vegeta report failed:", report_result.stderr)
-            return None
+            return None, None
 
         report_output = report_result.stdout
 
@@ -216,14 +213,42 @@ def parse_hey_output(output):
 
 def parse_vegeta_output(output):
     rps = None
+    latency = None
+    time_unit_multipliers = {
+        "ns": 1e-6,
+        "us": 1e-3,
+        "µs": 1e-3,
+        "ms": 1,
+        "s": 1e3,
+        "m": 6e4,
+        "h": 3.6e6,
+    }
+
     for line in output.splitlines():
+        # Parse RPS (from 'throughput' line)
         if "throughput" in line.lower():
             try:
                 rps = float(line.strip().split(",")[-1])
-                break
-            except Exception:
+            except Exception as e:
+                print("Failed to parse RPS:", e)
                 continue
-    return rps
+
+        # Parse mean latency
+        elif line.startswith("Latencies"):
+            try:
+                parts = line.split("]")[-1].strip().split(",")
+                mean_str = parts[1].strip()  # 2nd value is mean
+                match = re.match(r"([\d.]+)([a-zµ]+)", mean_str)
+                if match:
+                    val, unit = match.groups()
+                    multiplier = time_unit_multipliers.get(unit, None)
+                    if multiplier is not None:
+                        latency = float(val) * multiplier
+            except Exception as e:
+                print("Failed to parse latency:", e)
+                continue
+
+    return rps, latency
 
 
 def setup_resource_sampling():
@@ -292,8 +317,9 @@ def monitor_and_record_resource_usage(
     monitor_thread.start()
 
     rps = None
+    latency = None
     if use_vegeta:
-        rps = run_vegeta(
+        rps, latency = run_vegeta(
             scenario=scenario,
             payload_size=size,
             run_id=run_id,
@@ -323,11 +349,11 @@ def monitor_and_record_resource_usage(
         avg_mem = sum(s[1] for s in samples) / len(samples)
         write_result(
             output_csv,
-            ["scenario", "payload_size", "qps", "run_id", "requests_per_sec", "cpu_percent", "memory_mb"],
-            [scenario, size, qps, run_id, rps, avg_cpu, avg_mem]
+            ["scenario", "payload_size", "qps", "run_id", "requests_per_sec", "avg_latency_ms", "cpu_percent", "memory_mb"],
+            [scenario, size, qps, run_id, rps, latency, avg_cpu, avg_mem]
         )
     else:
-        print("No resource samples collected or RPS unavailable.")
+        print("No resource samples collected or RPS/latency unavailable.")
 
     stop_all(scenario)
 

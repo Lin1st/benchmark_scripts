@@ -18,6 +18,7 @@ from paths import (
     OUTPUT_IMG_COMBINED_LATENCY,
     OUTPUT_IMG_RESOURCE_CPU_RPS,
     OUTPUT_IMG_RESOURCE_MEM_RPS,
+    OUTPUT_IMG_LATENCY_RPS,
 )
 
 
@@ -206,11 +207,35 @@ def plot_resource_vs_rps(resource_vs_rps_df):
         )
 
 
+def plot_latency_vs_rps(resource_vs_rps_df):
+    latency_summary = resource_vs_rps_df.groupby(
+        ["scenario", "payload_size", "qps"]
+    ).agg(
+        mean_val=("avg_latency_ms", "mean"),
+        std_val=("avg_latency_ms", "std"),
+        count=("avg_latency_ms", "count")
+    ).reset_index()
+
+    latency_summary["ci"] = latency_summary.apply(
+        lambda row: compute_confidence_interval(row["std_val"], row["count"], CONF_LEVEL, CI_METHOD),
+        axis=1
+    )
+
+    plot_with_ci_grouped(
+        latency_summary,
+        group_cols=["scenario", "payload_size"],
+        x_col="qps",
+        y_label="Latency (ms)",
+        title="Latency vs RPS",
+        output_file=OUTPUT_IMG_LATENCY_RPS
+    )
+
+
 # ========================= MAIN =========================
 def main():
-    df = pd.read_csv(THROUGHPUT_CSV)
-    plot_throughput(df)
-    plot_latency_under_stress(df)
+    #df = pd.read_csv(THROUGHPUT_CSV)
+    #plot_throughput(df)
+    #plot_latency_under_stress(df)
 
     if os.path.exists(BASELINE_LATENCY_CSV):
         baseline_df = pd.read_csv(BASELINE_LATENCY_CSV)
@@ -227,6 +252,7 @@ def main():
     if os.path.exists(RESOURCE_VS_RPS_CSV):
         resource_vs_rps_df = pd.read_csv(RESOURCE_VS_RPS_CSV)
         plot_resource_vs_rps(resource_vs_rps_df)
+        plot_latency_vs_rps(resource_vs_rps_df)
     else:
         print(f"Resource vs RPS file '{RESOURCE_VS_RPS_CSV}' not found.")
 

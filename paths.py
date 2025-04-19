@@ -9,6 +9,7 @@ THROUGHPUT_CSV = ROOT_DIR / "benchmark_results.csv"
 BASELINE_LATENCY_CSV = ROOT_DIR / "baseline_latency.csv"
 RESOURCE_PROFILE_CSV = ROOT_DIR / "resource_profile.csv"
 RESOURCE_VS_RPS_CSV = ROOT_DIR / "resource_vs_rps.csv"
+LATENCY_VS_RPS_CSV = ROOT_DIR / "latency_vs_rps.csv"
 HEY_DEBUG_LOG = ROOT_DIR / "hey_debug_log.txt"
 VEGETA_DEBUG_LOG = ROOT_DIR / "vegeta_debug_log.txt"
 
@@ -25,6 +26,7 @@ OUTPUT_IMG_BASELINE_LATENCY = PLOTS_DIR / "baseline_latency_plot.png"
 OUTPUT_IMG_COMBINED_LATENCY = PLOTS_DIR / "combined_latency_plot.png"
 OUTPUT_IMG_RESOURCE_CPU_RPS = PLOTS_DIR / "resource_vs_rps_cpu.png"
 OUTPUT_IMG_RESOURCE_MEM_RPS = PLOTS_DIR / "resource_vs_rps_mem.png"
+OUTPUT_IMG_LATENCY_RPS = PLOTS_DIR / "latency_vs_rps.png"
 
 #  External benchmark directory template
 BENCH_DIR_TEMPLATE = str(Path.home() / "Desktop" / "bench_{}B")
