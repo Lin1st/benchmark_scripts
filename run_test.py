@@ -1,4 +1,5 @@
 # run_test.py
+import argparse
 import subprocess
 import time
 import csv
@@ -32,6 +33,10 @@ BASELINE_LATENCY_RUNS = 5
 HEY_DURATION = "1s"
 HEY_CONCURRENCY = 3
 RESOURCE_SAMPLE_INTERVAL = 0.5
+
+CONFIG = {
+    "save_load_generator_output": False
+}
 
 
 # ================== UTILS ==================
@@ -127,7 +132,7 @@ def start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=Fal
         print("Warm-up HTTP request failed repeatedly (no 200 OK)")
 
 
-def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=HEY_CONCURRENCY, qps=None, duration=HEY_DURATION, wait=True):
+def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=HEY_CONCURRENCY, qps=None, duration=HEY_DURATION, wait=True, config=CONFIG):
     cmd = ["hey", "-z", duration]
     cmd += ["-c", str(concurrency)]
 
@@ -138,9 +143,10 @@ def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=HEY_CONCU
 
     if wait:
         result = subprocess.run(cmd, capture_output=True, text=True)
-        with open(HEY_DEBUG_LOG, "a") as f:
-            f.write(f"\n===== [HEY] Scenario={scenario}, Payload={payload_size}, Run={run_id} =====\n")
-            f.write(result.stdout)
+        if config["save_load_generator_output"]:
+            with open(HEY_DEBUG_LOG, "a") as f:
+                f.write(f"\n===== [HEY] Scenario={scenario}, Payload={payload_size}, Run={run_id} =====\n")
+                f.write(result.stdout)
 
         if result.returncode != 0:
             print("Hey failed:", result.stderr)
@@ -150,7 +156,7 @@ def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=HEY_CONCU
         return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
-def run_vegeta(scenario=None, payload_size=None, run_id=None, rate=50, duration="10s"):
+def run_vegeta(scenario=None, payload_size=None, run_id=None, rate=50, duration="10s", config=CONFIG):
     # Use a temp file to store attack output (binary format)
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         attack_path = tmp.name
@@ -175,9 +181,10 @@ def run_vegeta(scenario=None, payload_size=None, run_id=None, rate=50, duration=
 
         report_output = report_result.stdout
 
-        with open(VEGETA_DEBUG_LOG, "a") as f:
-            f.write(f"\n===== [VEGETA] Scenario={scenario}, Payload={payload_size}, Run={run_id} =====\n")
-            f.write(report_output)
+        if config["save_load_generator_output"]:
+            with open(VEGETA_DEBUG_LOG, "a") as f:
+                f.write(f"\n===== [VEGETA] Scenario={scenario}, Payload={payload_size}, Run={run_id} =====\n")
+                f.write(report_output)
 
         return parse_vegeta_output(report_output)
 
@@ -285,7 +292,8 @@ def monitor_and_record_resource_usage(
     qps,
     duration,
     output_csv,
-    use_vegeta=False
+    use_vegeta=False,
+    config=CONFIG
 ):
     start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=False)
     stop_event = ThreadEvent()
@@ -313,7 +321,8 @@ def monitor_and_record_resource_usage(
             payload_size=size,
             run_id=run_id,
             rate=qps,
-            duration=duration
+            duration=duration,
+            config=CONFIG
         )
     else:
         hey_proc = run_hey(
@@ -323,12 +332,14 @@ def monitor_and_record_resource_usage(
             qps=qps,
             concurrency=1,
             duration=duration,
-            wait=False
+            wait=False,
+            config=CONFIG
         )
         stdout, stderr = hey_proc.communicate()
-        with open(HEY_DEBUG_LOG, "a") as f:
-            f.write(f"\n===== [HEY] Scenario={scenario}, Payload={size}, Run={run_id} =====\n")
-            f.write(stdout)
+        if config["save_load_generator_output"]:
+            with open(HEY_DEBUG_LOG, "a") as f:
+                f.write(f"\n===== [HEY] Scenario={scenario}, Payload={size}, Run={run_id} =====\n")
+                f.write(stdout)
 
         if hey_proc.returncode == 0:
             rps, _ = parse_hey_output(stdout)
@@ -358,7 +369,7 @@ def monitor_and_record_resource_usage(
 
 
 # ================== BENCHMARK MODES ==================
-def benchmark_throughput_latency(scenario, wasmcloud_bin):
+def benchmark_throughput_latency(scenario, wasmcloud_bin, config=CONFIG):
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for run_id in range(1, RUNS_PER_SIZE + 1):
@@ -366,14 +377,14 @@ def benchmark_throughput_latency(scenario, wasmcloud_bin):
             # stop_all(scenario)
             start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=True)
 
-            result = run_hey(scenario, size, run_id)
+            result = run_hey(scenario, size, run_id, config=CONFIG)
             if result:
                 rps, latency = result
                 write_result(THROUGHPUT_CSV, ["scenario", "payload_size", "run_id", "requests_per_sec", "avg_latency_ms"], [scenario, size, run_id, rps, latency])
             stop_all(scenario)
 
 
-def benchmark_resource_usage(scenario, wasmcloud_bin, qps=10, duration="5s"):
+def benchmark_resource_usage(scenario, wasmcloud_bin, qps=10, duration="5s", config=CONFIG):
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for run_id in range(1, RUNS_PER_SIZE + 1):
@@ -389,11 +400,12 @@ def benchmark_resource_usage(scenario, wasmcloud_bin, qps=10, duration="5s"):
                 qps=qps,
                 #concurrency=concurrency,
                 duration=duration,
-                output_csv=RESOURCE_PROFILE_CSV
+                output_csv=RESOURCE_PROFILE_CSV,
+                config=CONFIG
             )
 
 
-def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=10, duration="1s"):
+def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=10, duration="1s", config=CONFIG):
     duration_sec = int(duration.strip("s"))
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
@@ -406,7 +418,8 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=10, duration="1s"):
                 run_id=f"idle{run_id}",
                 qps=qps,
                 concurrency=1,
-                duration=duration
+                duration=duration,
+                config=CONFIG
             )
             if result:
                 _, latency = result
@@ -419,7 +432,7 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=10, duration="1s"):
         stop_all(scenario)
 
 
-def benchmark_resource_vs_rps(scenario, wasmcloud_bin, duration="1s"):
+def benchmark_resource_vs_rps(scenario, wasmcloud_bin, duration="1s", config=CONFIG):
     sizes = [0, 65536]
     qps_values = [10, 50]
 
@@ -437,20 +450,30 @@ def benchmark_resource_vs_rps(scenario, wasmcloud_bin, duration="1s"):
                     qps=qps,
                     duration=duration,
                     output_csv=RESOURCE_VS_RPS_CSV,
-                    use_vegeta=True
+                    use_vegeta=True,
+                    config=CONFIG
                 )
 
 
 # ========================= MAIN =========================
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--save-load-generator-output",
+        action="store_true",
+        help="Save hey/vegeta output logs to debug files",
+    )
+    args = parser.parse_args()
+    CONFIG["save_load_generator_output"] = args.save_load_generator_output
+
     # Clear existing CSV
     for f in [THROUGHPUT_CSV, BASELINE_LATENCY_CSV, RESOURCE_PROFILE_CSV, RESOURCE_VS_RPS_CSV, HEY_DEBUG_LOG, VEGETA_DEBUG_LOG]:
         if os.path.exists(f):
             os.remove(f)
 
     for scenario, wasmcloud_bin in [("bypass", WASMCLOUD_BYPASS), ("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS)]:
-        #benchmark_baseline_latency(scenario, wasmcloud_bin)
-        #benchmark_throughput_latency(scenario, wasmcloud_bin)
-        benchmark_resource_usage(scenario, wasmcloud_bin)
-        #benchmark_resource_vs_rps(scenario, wasmcloud_bin)
+        #benchmark_baseline_latency(scenario, wasmcloud_bin, config=CONFIG)
+        #benchmark_throughput_latency(scenario, wasmcloud_bin, config=CONFIG)
+        benchmark_resource_usage(scenario, wasmcloud_bin, config=CONFIG)
+        #benchmark_resource_vs_rps(scenario, wasmcloud_bin, config=CONFIG)
 
