@@ -127,36 +127,21 @@ def start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=Fal
         print("Warm-up HTTP request failed repeatedly (no 200 OK)")
 
 
-def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=HEY_CONCURRENCY, duration=HEY_DURATION):
-    result = subprocess.run(
-        ["hey", "-z", duration, "-c", str(concurrency), "http://localhost:8000"],
-        capture_output=True,
-        text=True,
-    )
-    with open(HEY_DEBUG_LOG, "a") as f:
-        f.write(f"\n===== Scenario={scenario}, Payload={payload_size}, Run={run_id} =====\n{result.stdout}\n")
+def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=HEY_CONCURRENCY, qps=None, duration=HEY_DURATION, wait=True):
+    cmd = ["hey", "-z", duration]
+    cmd += ["-c", str(concurrency)]
 
-    if result.returncode != 0:
-        print("Hey failed:", result.stderr)
-        return None
+    if qps is not None:
+        cmd += ["-q", str(qps)]
 
-    return parse_hey_output(result.stdout)
-
-
-def run_hey_with_rate(scenario=None, payload_size=None, run_id=None, qps=50, duration="10s", wait=True):
-    #cmd = [
-    #    "hey", "-z", duration, "-q", str(qps), "-c", str(concurrency), "http://localhost:8000"
-    #]
-    cmd = [
-        "hey", "-z", duration, "-q", str(qps), "http://localhost:8000"
-    ]
+    cmd.append("http://localhost:8000")
 
     if wait:
-        # Standalone (default)
         result = subprocess.run(cmd, capture_output=True, text=True)
         with open(HEY_DEBUG_LOG, "a") as f:
-            f.write(f"\n===== Scenario={scenario}, Payload={payload_size}, Run={run_id} =====\n")
+            f.write(f"\n===== [HEY] Scenario={scenario}, Payload={payload_size}, Run={run_id} =====\n")
             f.write(result.stdout)
+
         if result.returncode != 0:
             print("Hey failed:", result.stderr)
             return None
@@ -166,12 +151,14 @@ def run_hey_with_rate(scenario=None, payload_size=None, run_id=None, qps=50, dur
 
 
 def run_vegeta(scenario=None, payload_size=None, run_id=None, rate=50, duration="10s"):
+    # Use a temp file to store attack output (binary format)
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         attack_path = tmp.name
 
     try:
         attack_cmd = f"echo 'GET http://localhost:8000' | vegeta attack -rate={rate} -duration={duration} -output={attack_path}"
         attack_result = subprocess.run(attack_cmd, shell=True, capture_output=True, text=True)
+
         if attack_result.returncode != 0:
             print("Vegeta attack failed:", attack_result.stderr)
             return None, None
@@ -181,6 +168,7 @@ def run_vegeta(scenario=None, payload_size=None, run_id=None, rate=50, duration=
             capture_output=True,
             text=True
         )
+
         if report_result.returncode != 0:
             print("Vegeta report failed:", report_result.stderr)
             return None, None
@@ -214,6 +202,7 @@ def parse_hey_output(output):
 def parse_vegeta_output(output):
     rps = None
     latency = None
+
     time_unit_multipliers = {
         "ns": 1e-6,
         "us": 1e-3,
@@ -327,15 +316,20 @@ def monitor_and_record_resource_usage(
             duration=duration
         )
     else:
-        hey_proc = run_hey_with_rate(
+        hey_proc = run_hey(
             scenario=scenario,
             payload_size=size,
             run_id=run_id,
             qps=qps,
+            concurrency=1,
             duration=duration,
             wait=False
         )
         stdout, stderr = hey_proc.communicate()
+        with open(HEY_DEBUG_LOG, "a") as f:
+            f.write(f"\n===== [HEY] Scenario={scenario}, Payload={size}, Run={run_id} =====\n")
+            f.write(stdout)
+
         if hey_proc.returncode == 0:
             rps, _ = parse_hey_output(stdout)
         else:
@@ -347,11 +341,16 @@ def monitor_and_record_resource_usage(
     if rps and samples:
         avg_cpu = sum(s[0] for s in samples) / len(samples)
         avg_mem = sum(s[1] for s in samples) / len(samples)
-        write_result(
-            output_csv,
-            ["scenario", "payload_size", "qps", "run_id", "requests_per_sec", "avg_latency_ms", "cpu_percent", "memory_mb"],
-            [scenario, size, qps, run_id, rps, latency, avg_cpu, avg_mem]
-        )
+        headers = ["scenario", "payload_size", "qps", "run_id", "requests_per_sec", "cpu_percent", "memory_mb"]
+        row = [scenario, size, qps, run_id, rps, avg_cpu, avg_mem]
+
+        # Only include latency if we have/need it
+        if latency is not None:
+            headers.insert(5, "avg_latency_ms")
+            row.insert(5, latency)
+
+        write_result(output_csv, headers, row)
+
     else:
         print("No resource samples collected or RPS/latency unavailable.")
 
@@ -366,7 +365,6 @@ def benchmark_throughput_latency(scenario, wasmcloud_bin):
             print(f"Running scenario={scenario} size={size} run={run_id}")
             # stop_all(scenario)
             start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=True)
-
 
             result = run_hey(scenario, size, run_id)
             if result:
@@ -402,7 +400,7 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=10, duration="1s"):
 
         for run_id in range(1, BASELINE_LATENCY_RUNS + 1):
             start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=False)
-            result = run_hey_with_rate(
+            result = run_hey(
                 scenario=scenario,
                 payload_size=size,
                 run_id=f"idle{run_id}",
@@ -453,6 +451,6 @@ if __name__ == "__main__":
     for scenario, wasmcloud_bin in [("bypass", WASMCLOUD_BYPASS), ("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS)]:
         #benchmark_baseline_latency(scenario, wasmcloud_bin)
         #benchmark_throughput_latency(scenario, wasmcloud_bin)
-        #benchmark_resource_usage(scenario, wasmcloud_bin)
-        benchmark_resource_vs_rps(scenario, wasmcloud_bin)
+        benchmark_resource_usage(scenario, wasmcloud_bin)
+        #benchmark_resource_vs_rps(scenario, wasmcloud_bin)
 
