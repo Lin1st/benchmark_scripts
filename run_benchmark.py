@@ -1,4 +1,4 @@
-# run_test.py
+# run_benchmark.py
 import argparse
 import subprocess
 import time
