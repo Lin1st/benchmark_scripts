@@ -5,11 +5,10 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent.resolve()
 
 # Paths to data files
-THROUGHPUT_CSV = ROOT_DIR / "benchmark_results.csv"
+THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV = ROOT_DIR / "throughput_and_latency_vs_payload_size_under_load.csv"
 BASELINE_LATENCY_CSV = ROOT_DIR / "baseline_latency.csv"
-RESOURCE_PROFILE_CSV = ROOT_DIR / "resource_profile.csv"
-RESOURCE_VS_RPS_CSV = ROOT_DIR / "resource_vs_rps.csv"
-LATENCY_VS_RPS_CSV = ROOT_DIR / "latency_vs_rps.csv"
+RESOURCE_VS_PAYLOAD_SIZE_CSV = ROOT_DIR / "resource_vs_payload_size.csv"
+RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV = ROOT_DIR / "resource_and_latency_vs_request_rate.csv"
 HEY_DEBUG_LOG = ROOT_DIR / "hey_debug_log.txt"
 VEGETA_DEBUG_LOG = ROOT_DIR / "vegeta_debug_log.txt"
 
@@ -18,15 +17,15 @@ PLOTS_DIR = ROOT_DIR / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
 
 # Output image files
-OUTPUT_IMG_THROUGHPUT = PLOTS_DIR / "throughput_plot.png"
-OUTPUT_IMG_LATENCY = PLOTS_DIR / "latency_plot.png"
-OUTPUT_IMG_CPU = PLOTS_DIR / "cpu_plot.png"
-OUTPUT_IMG_MEM = PLOTS_DIR / "memory_plot.png"
-OUTPUT_IMG_BASELINE_LATENCY = PLOTS_DIR / "baseline_latency_plot.png"
-OUTPUT_IMG_COMBINED_LATENCY = PLOTS_DIR / "combined_latency_plot.png"
-OUTPUT_IMG_RESOURCE_CPU_RPS = PLOTS_DIR / "resource_vs_rps_cpu.png"
-OUTPUT_IMG_RESOURCE_MEM_RPS = PLOTS_DIR / "resource_vs_rps_mem.png"
-OUTPUT_IMG_LATENCY_RPS = PLOTS_DIR / "latency_vs_rps.png"
+OUTPUT_IMG_THROUGHPUT_VS_PAYLOAD_SIZE_UNDER_LOAD = PLOTS_DIR / "throughput_vs_payload_size_under_load.png"
+OUTPUT_IMG_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD = PLOTS_DIR / "latency_vs_payload_size_under_load.png"
+OUTPUT_IMG_CPU_USAGE_VS_PAYLOAD_SIZE = PLOTS_DIR / "cpu_usage_vs_payload_size.png"
+OUTPUT_IMG_MEM_USAGE_VS_PAYLOAD_SIZE = PLOTS_DIR / "mem_usage_vs_payload_size.png"
+OUTPUT_IMG_BASELINE_LATENCY = PLOTS_DIR / "baseline_latency.png"
+OUTPUT_IMG_COMBINED_LATENCY = PLOTS_DIR / "combined_latency.png"
+OUTPUT_IMG_CPU_USAGE_VS_REQUEST_RATE = PLOTS_DIR / "cpu_usage_vs_request_rate.png"
+OUTPUT_IMG_MEM_USAGE_VS_REQUEST_RATE = PLOTS_DIR / "mem_usage_vs_request_rate.png"
+OUTPUT_IMG_LATENCY_VS_REQUEST_RATE = PLOTS_DIR / "latency_vs_request_rate.png"
 
 #  External benchmark directory template
 BENCH_DIR_TEMPLATE = str(Path.home() / "Desktop" / "bench_{}B")
@@ -36,3 +35,8 @@ WASMCLOUD_NATS = Path("/home/lin/Desktop/wasmCloud_nats/wasmCloud_first_try/targ
 WASMCLOUD_BYPASS = Path("/home/lin/Desktop/wasmCloud_mpsc/wasmCloud_first_try/target/release/wasmcloud")
 WASH = Path("/home/lin/Desktop/wash")
 
+# Provider reference
+HTTP_PROVIDER_REFERENCE = "ghcr.io/wasmcloud/http-server:0.22.0"
+
+# URL
+URL = "http://127.0.0.1:8000"

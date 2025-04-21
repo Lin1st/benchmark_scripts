@@ -15,10 +15,12 @@ from paths import (
     WASMCLOUD_NATS,
     WASMCLOUD_BYPASS,
     WASH,
-    THROUGHPUT_CSV,
+    HTTP_PROVIDER_REFERENCE,
+    URL,
+    THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV,
     BASELINE_LATENCY_CSV,
-    RESOURCE_PROFILE_CSV,
-    RESOURCE_VS_RPS_CSV,
+    RESOURCE_VS_PAYLOAD_SIZE_CSV,
+    RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV,
     BENCH_DIR_TEMPLATE,
     HEY_DEBUG_LOG,
     VEGETA_DEBUG_LOG,
@@ -27,16 +29,17 @@ from paths import (
 
 # Benchmark settings
 PAYLOAD_SIZES = [0, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
-PAYLOAD_SIZES = [0, 512]
-RUNS_PER_SIZE = 5
-BASELINE_LATENCY_RUNS = 5
-HEY_DURATION = "1s"
-HEY_CONCURRENCY = 3
+#PAYLOAD_SIZES = [0, 512]
+REQUEST_RATES = [10, 50, 100, 200, 500]
+NUM_OF_RUNS = 20
+REQUESTS_SENDING_DURATION = "5s"
+UNDER_LOAD_CONCURRENCY = 10
 RESOURCE_SAMPLE_INTERVAL = 0.5
 
 CONFIG = {
     "save_load_generator_output": False
 }
+LIMIT_RESOURCE_USAGE = False
 
 
 # ================== UTILS ==================
@@ -73,73 +76,100 @@ def find_named_process(name_match):
         if name_match in " ".join(p.info["cmdline"]):
             return psutil.Process(p.info["pid"])
     return None
+    
+
+# Warm-up request is needed because wasmCloud components are lazy-loaded
+# This ensures the first real request doesn't include cold-start latency
+def warm_up(url):
+    for attempt in range(10):
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", url],
+                capture_output=True, text=True
+            )
+            if r.stdout.strip() == "200":
+                print("Warm-up HTTP request successful")
+                return  # Exit early on success
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed with error: {e}")
+        time.sleep(2)
+
+    raise RuntimeError(f"Warm-up HTTP request failed repeatedly (no 200 OK from {url})")
 
 
-def stop_all(scenario):
-    aliases = {"bypass": ["http2", "pong"], "nats": ["http2", "pong"], "composed": ["composed"]}.get(scenario, [])
+# Manage without wadm
+def shutdown_benchmark_env(scenario):
+    aliases = {"bypass": ["http", "pong"], "nats": ["http", "pong"], "composed": ["composed"]}.get(scenario, [])
     for alias in aliases:
         subprocess.run([WASH, "stop", "component", alias], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run([WASH, "stop", "provider", "http-server"], stdout=subprocess.DEVNULL)
-    subprocess.run([WASH, "link", "del", "--all"], stdout=subprocess.DEVNULL)
+    subprocess.run([WASH, "link", "del", "http-server", "wasi", "http"], stdout=subprocess.DEVNULL)
+    subprocess.run([WASH, "link", "del", "http", "example", "pong"], stdout=subprocess.DEVNULL)
     subprocess.run(["pkill", "-f", "wasmcloud"], stdout=subprocess.DEVNULL)
-    subprocess.run(["docker", "rm", "-f", "nats-server"], stdout=subprocess.DEVNULL)
+    time.sleep(10)
+    subprocess.run(["docker", "rm", "-f", "/nats-server"], stdout=subprocess.DEVNULL)
     time.sleep(2)
 
 
-def start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=False):
+# Manage without wadm
+def setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, limit_usage=False, url=URL):
+    host, port = url.split("://")[1].split(":")
+    port = int(port)
+
     subprocess.run(build_systemd_cmd(f"nats-{run_id}") + [
         "docker", "run", "-d", "--name", "nats-server",
         "-p", "4222:4222", "-p", "8222:8222", "nats:latest", "-js"
     ])
-    wait_for_port("127.0.0.1", 4222)
+    wait_for_port(host, 4222)
     time.sleep(5)
 
     subprocess.Popen(build_systemd_cmd(f"host-{run_id}", limit_usage=limit_usage) + [
         "env",
         "WASMCLOUD_ALLOW_FILE_LOAD=true",
-        "WASMCLOUD_RPC_HOST=127.0.0.1",
-        "WASMCLOUD_CTL_HOST=127.0.0.1",
+        f"WASMCLOUD_RPC_HOST={host}",
+        f"WASMCLOUD_CTL_HOST={host}",
         wasmcloud_bin,
         "--max-components", "10"
     ])
     time.sleep(20)
 
-    subprocess.run([WASH, "start", "provider", "ghcr.io/wasmcloud/http-server:0.22.0", "http-server"])
+    subprocess.run([WASH, "start", "provider", provider_reference, "http-server"])
     time.sleep(2)
 
     if scenario == "composed":
         subprocess.run([WASH, "link", "put", "--interface", "incoming-handler", "http-server", "composed", "wasi", "http"])
         subprocess.run([WASH, "start", "component", f"{bench_path}/wasmCloud_benchmark/composed.wasm", "composed"])
     else:
-        subprocess.run([WASH, "link", "put", "--interface", "incoming-handler", "http-server", "http2", "wasi", "http"])
-        subprocess.run([WASH, "link", "put", "--interface", "pingpong", "http2", "pong", "example", "pong"])
-        subprocess.run([WASH, "start", "component", f"{bench_path}/wasmCloud_benchmark/http-hello2/build/http_hello_world_s.wasm", "http2"])
+        subprocess.run([WASH, "link", "put", "--interface", "incoming-handler", "http-server", "http", "wasi", "http"])
+        subprocess.run([WASH, "link", "put", "--interface", "pingpong", "http", "pong", "example", "pong"])
+        subprocess.run([WASH, "start", "component", f"{bench_path}/wasmCloud_benchmark/http-hello2/build/http_hello_world_s.wasm", "http"])
         subprocess.run([WASH, "start", "component", f"{bench_path}/wasmCloud_benchmark/pong/build/pong_s.wasm", "pong"])
 
-    wait_for_port("127.0.0.1", 8000, timeout=15)
-
-    for attempt in range(10):
-        try:
-            r = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:8000"],
-                               capture_output=True, text=True)
-            if r.stdout.strip() == "200":
-                print("Warm-up HTTP request successful")
-                break
-        except Exception:
-            pass
-        time.sleep(2)
-    else:
-        print("Warm-up HTTP request failed repeatedly (no 200 OK)")
+    wait_for_port(host, port, timeout=15)
+    warm_up(url)
 
 
-def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=HEY_CONCURRENCY, qps=None, duration=HEY_DURATION, wait=True, config=CONFIG):
+def parse_hey_output(output):
+    throughput = latency = None
+    for line in output.splitlines():
+        if line.startswith("  Requests/sec"):
+            throughput = float(line.split()[1])
+        if line.startswith("  Average"):
+            try:
+                latency = float(line.split()[1]) * 1000
+            except ValueError:
+                latency = None
+    return (throughput, latency) if throughput and latency else (None, None)
+
+
+def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=1, rate_limit_per_worker=None, duration=REQUESTS_SENDING_DURATION, wait=True, config=CONFIG):
     cmd = ["hey", "-z", duration]
     cmd += ["-c", str(concurrency)]
 
-    if qps is not None:
-        cmd += ["-q", str(qps)]
+    if rate_limit_per_worker is not None:
+        cmd += ["-q", str(rate_limit_per_worker)]
 
-    cmd.append("http://localhost:8000")
+    cmd.append(URL)
 
     if wait:
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -156,13 +186,50 @@ def run_hey(scenario=None, payload_size=None, run_id=None, concurrency=HEY_CONCU
         return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
-def run_vegeta(scenario=None, payload_size=None, run_id=None, rate=50, duration="10s", config=CONFIG):
+def parse_vegeta_output(output):
+    request_rate = latency = None
+
+    time_unit_multipliers = {
+        "ns": 1e-6,
+        "us": 1e-3,
+        "µs": 1e-3,
+        "ms": 1,
+        "s": 1e3,
+        "m": 6e4,
+        "h": 3.6e6,
+    }
+
+    for line in output.splitlines():
+        if "throughput" in line.lower():
+            try:
+                throughput = float(line.strip().split(",")[-1])
+            except Exception as e:
+                print("Failed to parse throughput:", e)
+
+        # Parse mean latency
+        elif line.startswith("Latencies"):
+            try:
+                parts = line.split("]")[-1].strip().split(",")
+                mean_str = parts[1].strip()  # 2nd value is mean
+                match = re.match(r"([\d.]+)([a-zµ]+)", mean_str)
+                if match:
+                    val, unit = match.groups()
+                    multiplier = time_unit_multipliers.get(unit, None)
+                    if multiplier is not None:
+                        latency = float(val) * multiplier
+            except Exception as e:
+                print("Failed to parse latency:", e)
+
+    return throughput, latency
+
+
+def run_vegeta(scenario=None, payload_size=None, run_id=None, request_rate=50, duration=REQUESTS_SENDING_DURATION, url=URL, config=CONFIG):
     # Use a temp file to store attack output (binary format)
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         attack_path = tmp.name
 
     try:
-        attack_cmd = f"echo 'GET http://localhost:8000' | vegeta attack -rate={rate} -duration={duration} -output={attack_path}"
+        attack_cmd = f"echo 'GET {url}' | vegeta attack -rate={request_rate} -duration={duration} -output={attack_path}"
         attack_result = subprocess.run(attack_cmd, shell=True, capture_output=True, text=True)
 
         if attack_result.returncode != 0:
@@ -193,60 +260,6 @@ def run_vegeta(scenario=None, payload_size=None, run_id=None, rate=50, duration=
             os.remove(attack_path)
 
 
-def parse_hey_output(output):
-    rps = latency = None
-    for line in output.splitlines():
-        if line.startswith("  Requests/sec"):
-            rps = float(line.split()[1])
-        if line.startswith("  Average"):
-            try:
-                latency = float(line.split()[1]) * 1000
-            except ValueError:
-                latency = None
-    return (rps, latency) if rps and latency else (None, None)
-
-
-def parse_vegeta_output(output):
-    rps = None
-    latency = None
-
-    time_unit_multipliers = {
-        "ns": 1e-6,
-        "us": 1e-3,
-        "µs": 1e-3,
-        "ms": 1,
-        "s": 1e3,
-        "m": 6e4,
-        "h": 3.6e6,
-    }
-
-    for line in output.splitlines():
-        # Parse RPS (from 'throughput' line)
-        if "throughput" in line.lower():
-            try:
-                rps = float(line.strip().split(",")[-1])
-            except Exception as e:
-                print("Failed to parse RPS:", e)
-                continue
-
-        # Parse mean latency
-        elif line.startswith("Latencies"):
-            try:
-                parts = line.split("]")[-1].strip().split(",")
-                mean_str = parts[1].strip()  # 2nd value is mean
-                match = re.match(r"([\d.]+)([a-zµ]+)", mean_str)
-                if match:
-                    val, unit = match.groups()
-                    multiplier = time_unit_multipliers.get(unit, None)
-                    if multiplier is not None:
-                        latency = float(val) * multiplier
-            except Exception as e:
-                print("Failed to parse latency:", e)
-                continue
-
-    return rps, latency
-
-
 def setup_resource_sampling():
     wasm_proc = find_named_process("wasmcloud")
     nats_proc = find_named_process("nats-server")
@@ -268,60 +281,53 @@ def sample_resource_snapshot(wasm_proc, nats_proc):
 
     # wasmCloud spawns providers as separate processes
     for child in wasm_proc.children(recursive=True):
-        try:
-            wasm_cpu += child.cpu_percent(interval=None)
-            wasm_mem += child.memory_info().rss
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
+        wasm_cpu += child.cpu_percent(interval=None)
+        wasm_mem += child.memory_info().rss
 
     nats_cpu = nats_proc.cpu_percent(interval=None)
     nats_mem = nats_proc.memory_info().rss
 
     total_cpu = wasm_cpu + nats_cpu
-    total_mem_mb = (wasm_mem + nats_mem) / 1024 ** 2
+    total_mem_mib = (wasm_mem + nats_mem) / 1024 ** 2
 
-    return total_cpu, total_mem_mb
+    return total_cpu, total_mem_mib
 
 
 def monitor_and_record_resource_usage(
     wasmcloud_bin,
+    provider_reference,
     bench_path,
     scenario,
     size,
     run_id,
-    qps,
-    duration,
+    request_rate,
     output_csv,
+    concurrency=1,
     use_vegeta=False,
     config=CONFIG
 ):
-    start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=False)
+    setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, limit_usage=LIMIT_RESOURCE_USAGE)
     stop_event = ThreadEvent()
     samples = []
 
     def sampler():
-        try:
-            wasm_proc, nats_proc = setup_resource_sampling()
+        wasm_proc, nats_proc = setup_resource_sampling()
+        time.sleep(RESOURCE_SAMPLE_INTERVAL)
+        while not stop_event.is_set():
+            cpu, mem = sample_resource_snapshot(wasm_proc, nats_proc)
+            samples.append((cpu, mem))
             time.sleep(RESOURCE_SAMPLE_INTERVAL)
-            while not stop_event.is_set():
-                cpu, mem = sample_resource_snapshot(wasm_proc, nats_proc)
-                samples.append((cpu, mem))
-                time.sleep(RESOURCE_SAMPLE_INTERVAL)
-        except RuntimeError as e:
-            print(f"Resource sampling error: {e}")
 
     monitor_thread = Thread(target=sampler)
     monitor_thread.start()
 
-    rps = None
-    latency = None
+    throughput = latency = None
     if use_vegeta:
-        rps, latency = run_vegeta(
+        throughput, latency = run_vegeta(
             scenario=scenario,
             payload_size=size,
             run_id=run_id,
-            rate=qps,
-            duration=duration,
+            request_rate=request_rate,
             config=CONFIG
         )
     else:
@@ -329,9 +335,8 @@ def monitor_and_record_resource_usage(
             scenario=scenario,
             payload_size=size,
             run_id=run_id,
-            qps=qps,
-            concurrency=1,
-            duration=duration,
+            rate_limit_per_worker=request_rate,
+            concurrency=concurrency,
             wait=False,
             config=CONFIG
         )
@@ -341,19 +346,16 @@ def monitor_and_record_resource_usage(
                 f.write(f"\n===== [HEY] Scenario={scenario}, Payload={size}, Run={run_id} =====\n")
                 f.write(stdout)
 
-        if hey_proc.returncode == 0:
-            rps, _ = parse_hey_output(stdout)
-        else:
-            print(f"Hey failed: {stderr}")
+        throughput, _ = parse_hey_output(stdout)
 
     stop_event.set()
     monitor_thread.join()
 
-    if rps and samples:
-        avg_cpu = sum(s[0] for s in samples) / len(samples)
-        avg_mem = sum(s[1] for s in samples) / len(samples)
-        headers = ["scenario", "payload_size", "qps", "run_id", "requests_per_sec", "cpu_percent", "memory_mb"]
-        row = [scenario, size, qps, run_id, rps, avg_cpu, avg_mem]
+    if throughput and samples:
+        cpu = sum(s[0] for s in samples) / len(samples)
+        mem = sum(s[1] for s in samples) / len(samples)
+        headers = ["scenario", "payload_size", "request_rate", "run_id", "throughput", "cpu_percent", "memory_mib"]
+        row = [scenario, size, request_rate, run_id, throughput, cpu, mem]
 
         # Only include latency if we have/need it
         if latency is not None:
@@ -362,63 +364,55 @@ def monitor_and_record_resource_usage(
 
         write_result(output_csv, headers, row)
 
-    else:
-        print("No resource samples collected or RPS/latency unavailable.")
-
-    stop_all(scenario)
+    shutdown_benchmark_env(scenario)
 
 
 # ================== BENCHMARK MODES ==================
-def benchmark_throughput_latency(scenario, wasmcloud_bin, config=CONFIG):
+def benchmark_throughput_latency(scenario, wasmcloud_bin, provider_reference, config=CONFIG):
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
-        for run_id in range(1, RUNS_PER_SIZE + 1):
+        for run_id in range(1, NUM_OF_RUNS + 1):
             print(f"Running scenario={scenario} size={size} run={run_id}")
-            # stop_all(scenario)
-            start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=True)
+            setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, limit_usage=LIMIT_RESOURCE_USAGE)
 
-            result = run_hey(scenario, size, run_id, config=CONFIG)
+            result = run_hey(scenario, size, run_id, UNDER_LOAD_CONCURRENCY, config=CONFIG)
             if result:
-                rps, latency = result
-                write_result(THROUGHPUT_CSV, ["scenario", "payload_size", "run_id", "requests_per_sec", "avg_latency_ms"], [scenario, size, run_id, rps, latency])
-            stop_all(scenario)
+                throughput, latency = result
+                write_result(THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV, ["scenario", "payload_size", "run_id", "throughput", "avg_latency_ms"], [scenario, size, run_id, throughput, latency])
+            shutdown_benchmark_env(scenario)
 
 
-def benchmark_resource_usage(scenario, wasmcloud_bin, qps=10, duration="5s", config=CONFIG):
+def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, request_rate=10, config=CONFIG):
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
-        for run_id in range(1, RUNS_PER_SIZE + 1):
-            # Auto-adjust concurrency based on QPS
-            #concurrency = max(1, min(qps // 10, 100))
+        for run_id in range(1, NUM_OF_RUNS + 1):
             print(f"Resource profiling scenario={scenario} size={size} run={run_id}")
             monitor_and_record_resource_usage(
                 wasmcloud_bin=wasmcloud_bin,
+                provider_reference=provider_reference,
                 bench_path=bench_path,
                 scenario=scenario,
                 size=size,
                 run_id=run_id,
-                qps=qps,
-                #concurrency=concurrency,
-                duration=duration,
-                output_csv=RESOURCE_PROFILE_CSV,
+                request_rate=request_rate,
+                concurrency=1,
+                output_csv=RESOURCE_VS_PAYLOAD_SIZE_CSV
                 config=CONFIG
             )
 
 
-def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=10, duration="1s", config=CONFIG):
-    duration_sec = int(duration.strip("s"))
+def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, request_rate=10, config=CONFIG):
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
 
-        for run_id in range(1, BASELINE_LATENCY_RUNS + 1):
-            start_wasmcloud(scenario, wasmcloud_bin, bench_path, run_id, limit_usage=False)
+        for run_id in range(1, NUM_OF_RUNS + 1):
+            setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, limit_usage=LIMIT_RESOURCE_USAGE)
             result = run_hey(
                 scenario=scenario,
                 payload_size=size,
                 run_id=f"idle{run_id}",
-                qps=qps,
+                rate_limit_per_worker=request_rate,
                 concurrency=1,
-                duration=duration,
                 config=CONFIG
             )
             if result:
@@ -429,34 +423,33 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, qps=10, duration="1s", c
                     [scenario, size, run_id, latency]
                 )
 
-        stop_all(scenario)
+        shutdown_benchmark_env(scenario)
 
 
-def benchmark_resource_vs_rps(scenario, wasmcloud_bin, duration="1s", config=CONFIG):
+def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_reference, config=CONFIG):
     sizes = [0, 65536]
-    qps_values = [10, 50]
 
     for size in sizes:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
-        for qps in qps_values:
-            for run_id in range(1, RUNS_PER_SIZE + 1):
-                print(f"Resource vs RPS scenario={scenario} size={size} qps={qps} run={run_id}")
+        for request_rate in REQUEST_RATES:
+            for run_id in range(1, NUM_OF_RUNS + 1):
+                print(f"Resource vs Request Rate scenario={scenario} size={size} request_rate={request_rate} run={run_id}")
                 monitor_and_record_resource_usage(
                     wasmcloud_bin=wasmcloud_bin,
+                    provider_reference=provider_reference,
                     bench_path=bench_path,
                     scenario=scenario,
                     size=size,
                     run_id=run_id,
-                    qps=qps,
-                    duration=duration,
-                    output_csv=RESOURCE_VS_RPS_CSV,
+                    request_rate=request_rate,
+                    output_csv=RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV,
                     use_vegeta=True,
                     config=CONFIG
                 )
 
 
 # ========================= MAIN =========================
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--save-load-generator-output",
@@ -467,13 +460,17 @@ if __name__ == "__main__":
     CONFIG["save_load_generator_output"] = args.save_load_generator_output
 
     # Clear existing CSV
-    for f in [THROUGHPUT_CSV, BASELINE_LATENCY_CSV, RESOURCE_PROFILE_CSV, RESOURCE_VS_RPS_CSV, HEY_DEBUG_LOG, VEGETA_DEBUG_LOG]:
+    for f in [THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV, BASELINE_LATENCY_CSV, RESOURCE_VS_PAYLOAD_SIZE_CSV, RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV, HEY_DEBUG_LOG, VEGETA_DEBUG_LOG]:
         if os.path.exists(f):
             os.remove(f)
 
-    for scenario, wasmcloud_bin in [("bypass", WASMCLOUD_BYPASS), ("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS)]:
-        #benchmark_baseline_latency(scenario, wasmcloud_bin, config=CONFIG)
-        #benchmark_throughput_latency(scenario, wasmcloud_bin, config=CONFIG)
-        benchmark_resource_usage(scenario, wasmcloud_bin, config=CONFIG)
-        #benchmark_resource_vs_rps(scenario, wasmcloud_bin, config=CONFIG)
+    for scenario, wasmcloud_bin in [("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS), ("bypass", WASMCLOUD_BYPASS)]:
+        #benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, config=CONFIG)
+        #benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, config=CONFIG)
+        benchmark_resource_usage(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, config=CONFIG)
+        benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, config=CONFIG)
+
+
+if __name__ == "__main__":
+    main()
 

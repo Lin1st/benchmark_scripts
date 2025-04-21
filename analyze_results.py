@@ -6,19 +6,19 @@ from pathlib import Path
 from scipy.stats import t, norm
 import os
 from paths import (
-    THROUGHPUT_CSV,
+    THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV,
     BASELINE_LATENCY_CSV,
-    RESOURCE_PROFILE_CSV,
-    RESOURCE_VS_RPS_CSV,
-    OUTPUT_IMG_THROUGHPUT,
-    OUTPUT_IMG_LATENCY,
-    OUTPUT_IMG_CPU,
-    OUTPUT_IMG_MEM,
+    RESOURCE_VS_PAYLOAD_SIZE_CSV,
+    RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV,
+    OUTPUT_IMG_THROUGHPUT_VS_PAYLOAD_SIZE_UNDER_LOAD,
+    OUTPUT_IMG_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD,
+    OUTPUT_IMG_CPU_USAGE_VS_PAYLOAD_SIZE,
+    OUTPUT_IMG_MEM_USAGE_VS_PAYLOAD_SIZE,
     OUTPUT_IMG_BASELINE_LATENCY,
     OUTPUT_IMG_COMBINED_LATENCY,
-    OUTPUT_IMG_RESOURCE_CPU_RPS,
-    OUTPUT_IMG_RESOURCE_MEM_RPS,
-    OUTPUT_IMG_LATENCY_RPS,
+    OUTPUT_IMG_CPU_USAGE_VS_REQUEST_RATE,
+    OUTPUT_IMG_MEM_USAGE_VS_REQUEST_RATE,
+    OUTPUT_IMG_LATENCY_VS_REQUEST_RATE,
 )
 
 
@@ -87,16 +87,16 @@ def plot_with_ci_grouped(summary_df, group_cols, x_col, y_label, title, output_f
 
 
 # ================== PLOTS ==================
-# Throughput (under stress)
+# Throughput under load
 def plot_throughput(df):
-    throughput_summary = summarize(df, "requests_per_sec", CONF_LEVEL, CI_METHOD)
+    throughput_summary = summarize(df, "throughput", CONF_LEVEL, CI_METHOD)
     plot_with_ci_grouped(
         throughput_summary,
         group_cols=["scenario"],
         x_col="payload_size",
         y_label="Throughput (requests/sec)",
         title="Throughput vs Payload Size",
-        output_file=OUTPUT_IMG_THROUGHPUT
+        output_file=OUTPUT_IMG_THROUGHPUT_VS_PAYLOAD_SIZE_UNDER_LOAD
     )
 
 
@@ -109,7 +109,7 @@ def plot_latency_under_stress(df):
         x_col="payload_size",
         y_label="Average Latency (ms)",
         title="Latency vs Payload Size",
-        output_file=OUTPUT_IMG_LATENCY
+        output_file=OUTPUT_IMG_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD
     )
 
 
@@ -165,27 +165,27 @@ def plot_resource_usage(resource_df):
         x_col="payload_size",
         y_label="CPU Usage (%)",
         title="CPU Usage vs Payload Size",
-        output_file=OUTPUT_IMG_CPU
+        output_file=OUTPUT_IMG_CPU_USAGE_VS_PAYLOAD_SIZE
     )
 
-    mem_summary = summarize(resource_df, "memory_mb", CONF_LEVEL, CI_METHOD)
+    mem_summary = summarize(resource_df, "memory_mib", CONF_LEVEL, CI_METHOD)
     plot_with_ci_grouped(
         mem_summary,
         group_cols=["scenario"],
         x_col="payload_size",
-        y_label="Memory Usage (MB)",
+        y_label="Memory Usage (MiB)",
         title="Memory Usage vs Payload Size",
-        output_file=OUTPUT_IMG_MEM
+        output_file=OUTPUT_IMG_MEM_USAGE_VS_PAYLOAD_SIZE
     )
 
 
-def plot_resource_vs_rps(resource_vs_rps_df):
+def plot_resource_vs_request_rate(resource_vs_request_rate_df):
     for metric, y_label, output_file in [
-        ("cpu_percent", "CPU Usage (%)", OUTPUT_IMG_RESOURCE_CPU_RPS),
-        ("memory_mb", "Memory Usage (MB)", OUTPUT_IMG_RESOURCE_MEM_RPS)
+        ("cpu_percent", "CPU Usage (%)", OUTPUT_IMG_CPU_USAGE_VS_REQUEST_RATE),
+        ("memory_mib", "Memory Usage (MiB)", OUTPUT_IMG_MEM_USAGE_VS_REQUEST_RATE)
     ]:
-        summary = resource_vs_rps_df.groupby(
-            ["scenario", "payload_size", "qps"]
+        summary = resource_vs_request_rate_df.groupby(
+            ["scenario", "payload_size", "request_rate"]
         ).agg(
             mean_val=(metric, "mean"),
             std_val=(metric, "std"),
@@ -200,16 +200,16 @@ def plot_resource_vs_rps(resource_vs_rps_df):
         plot_with_ci_grouped(
             summary,
             group_cols=["scenario", "payload_size"],
-            x_col="qps",
+            x_col="request_rate",
             y_label=y_label,
-            title=f"{y_label} vs RPS",
+            title=f"{y_label} vs Request Rate",
             output_file=output_file
         )
 
 
-def plot_latency_vs_rps(resource_vs_rps_df):
-    latency_summary = resource_vs_rps_df.groupby(
-        ["scenario", "payload_size", "qps"]
+def plot_latency_vs_request_rate(resource_vs_request_rate_df):
+    latency_summary = resource_vs_request_rate_df.groupby(
+        ["scenario", "payload_size", "request_rate"]
     ).agg(
         mean_val=("avg_latency_ms", "mean"),
         std_val=("avg_latency_ms", "std"),
@@ -224,18 +224,18 @@ def plot_latency_vs_rps(resource_vs_rps_df):
     plot_with_ci_grouped(
         latency_summary,
         group_cols=["scenario", "payload_size"],
-        x_col="qps",
+        x_col="request_rate",
         y_label="Latency (ms)",
-        title="Latency vs RPS",
-        output_file=OUTPUT_IMG_LATENCY_RPS
+        title="Latency vs Request Rate",
+        output_file=OUTPUT_IMG_LATENCY_VS_REQUEST_RATE
     )
 
 
 # ========================= MAIN =========================
 def main():
-    #df = pd.read_csv(THROUGHPUT_CSV)
-    #plot_throughput(df)
-    #plot_latency_under_stress(df)
+    df = pd.read_csv(THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV )
+    plot_throughput(df)
+    plot_latency_under_stress(df)
 
     if os.path.exists(BASELINE_LATENCY_CSV):
         baseline_df = pd.read_csv(BASELINE_LATENCY_CSV)
@@ -243,18 +243,18 @@ def main():
     else:
         print(f"Baseline latency file '{BASELINE_LATENCY_CSV}' not found.")
         
-    if os.path.exists(RESOURCE_PROFILE_CSV):
-        resource_df = pd.read_csv(RESOURCE_PROFILE_CSV)
+    if os.path.exists(RESOURCE_VS_PAYLOAD_SIZE_CSV):
+        resource_df = pd.read_csv(RESOURCE_VS_PAYLOAD_SIZE_CSV)
         plot_resource_usage(resource_df)
     else:
-        print(f"Resource usage file '{RESOURCE_PROFILE_CSV}' not found.")
+        print(f"Resource usage file '{RESOURCE_VS_PAYLOAD_SIZE_CSV}' not found.")
 
-    if os.path.exists(RESOURCE_VS_RPS_CSV):
-        resource_vs_rps_df = pd.read_csv(RESOURCE_VS_RPS_CSV)
-        plot_resource_vs_rps(resource_vs_rps_df)
-        plot_latency_vs_rps(resource_vs_rps_df)
+    if os.path.exists(RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV):
+        resource_vs_request_rate_df = pd.read_csv(RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV)
+        plot_resource_vs_request_rate(resource_vs_request_rate_df)
+        plot_latency_vs_request_rate(resource_vs_request_rate_df)
     else:
-        print(f"Resource vs RPS file '{RESOURCE_VS_RPS_CSV}' not found.")
+        print(f"Resource vs Request Rate file '{RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV}' not found.")
 
 
 if __name__ == "__main__":
