@@ -40,3 +40,4 @@ HTTP_PROVIDER_REFERENCE = "ghcr.io/wasmcloud/http-server:0.22.0"
 
 # URL
 URL = "http://127.0.0.1:8000"
+

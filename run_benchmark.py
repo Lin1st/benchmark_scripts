@@ -31,19 +31,46 @@ from paths import (
 PAYLOAD_SIZES = [0, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
 #PAYLOAD_SIZES = [0, 512]
 REQUEST_RATES = [10, 50, 100, 200, 500]
-NUM_OF_RUNS = 20
-REQUESTS_SENDING_DURATION = "5s"
-UNDER_LOAD_CONCURRENCY = 10
+NUM_OF_RUNS = 10
+REQUESTS_SENDING_DURATION = "3s"
+UNDER_LOAD_CONCURRENCY = 5
 RESOURCE_SAMPLE_INTERVAL = 0.5
 
 CONFIG = {
     "save_load_generator_output": False
 }
-LIMIT_RESOURCE_USAGE = False
+
+RESOURCE_PROFILES = {
+    "unlimited": {
+        "cpu_quota": None,           # No CPU limit
+        "allowed_cpus": None,        # No core pinning (can float across all CPUs)
+        "memory_max": None           # No memory limit
+    },
+    "baseline": {
+        "cpu_quota": None,          # No CPU limit
+        "allowed_cpus": "0",        # Single physical core
+        "memory_max": None          # No memory limit
+    },
+    "under_load": {
+        "cpu_quota": "100%",        # Full CPU access
+        "allowed_cpus": "0,1",      # Two physical cores
+        "memory_max": "1024M"
+    },
+    "constrained": {
+        "cpu_quota": "50%",         # Half CPU time
+        "allowed_cpus": "0,1",      # Both cores, limited slice
+        "memory_max": "1024M"
+    },
+    "stress": {
+        "cpu_quota": "50%",         # Constrained with fewer cores
+        "allowed_cpus": "0",        # One core
+        "memory_max": "512M"
+    }
+}
 
 
 # ================== UTILS ==================
-def wait_for_port(host, port, timeout=10):
+def wait_for_port(host, port, timeout=60):
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -54,12 +81,47 @@ def wait_for_port(host, port, timeout=10):
     raise TimeoutError(f"Port {port} not available after {timeout}s")
 
 
-def build_systemd_cmd(suffix=None, limit_usage=False):
-    unit_name = f"wasmbench-{suffix or uuid.uuid4().hex[:8]}"
-    cmd = ["systemd-run", "--user", "--scope", f"--unit={unit_name}"]
-    if limit_usage:
-        cmd += ["-p", "CPUQuota=50%", "-p", "MemoryMax=512M"]
-    return cmd
+def build_systemd_cmd(suffix=None, run_id=None, cpu_quota=None, memory_max=None, allowed_cpus=None):
+    if run_id is not None:
+        unit_name = get_systemd_unit_name(suffix or "bench", run_id)
+    else:
+        unit_name = f"wasmbench-{suffix or uuid.uuid4().hex[:8]}"
+
+    cmd = ["systemd-run", "--user", "--scope", f"--unit={unit_name}", "-p", "Delegate=yes"]
+
+    if cpu_quota is not None:
+        cmd += ["-p", f"CPUQuota={cpu_quota}"]
+    if memory_max is not None:
+        cmd += ["-p", f"MemoryMax={memory_max}"]
+    if allowed_cpus is not None:
+        cmd += ["-p", f"AllowedCPUs={allowed_cpus}"]
+    return cmd, unit_name
+
+
+def get_cgroup_path(unit_name):
+    result = subprocess.run(
+        ["systemctl", "show", "--user", f"--property=ControlGroup", f"--unit={unit_name}"],
+        capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip().split("=")[1]
+
+
+def get_systemd_unit_name(role: str, run_id: int | str):
+    return f"wasmbench-{role}-{run_id}"
+
+def build_systemd_cmd(role=None, run_id=None, cpu_quota=None, memory_max=None, allowed_cpus=None):
+    unit_name = get_systemd_unit_name(role or "bench", run_id or uuid.uuid4().hex[:8])
+
+    cmd = ["systemd-run", "--user", "--scope", f"--unit={unit_name}", "-p", "Delegate=yes"]
+
+    if cpu_quota is not None:
+        cmd += ["-p", f"CPUQuota={cpu_quota}"]
+    if memory_max is not None:
+        cmd += ["-p", f"MemoryMax={memory_max}"]
+    if allowed_cpus is not None:
+        cmd += ["-p", f"AllowedCPUs={allowed_cpus}"]
+
+    return cmd, unit_name
 
 
 def write_result(path, headers, row):
@@ -98,7 +160,7 @@ def warm_up(url):
 
 
 # Manage without wadm
-def shutdown_benchmark_env(scenario):
+def shutdown_benchmark_env(scenario, run_id=None):
     aliases = {"bypass": ["http", "pong"], "nats": ["http", "pong"], "composed": ["composed"]}.get(scenario, [])
     for alias in aliases:
         subprocess.run([WASH, "stop", "component", alias], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -112,26 +174,42 @@ def shutdown_benchmark_env(scenario):
 
 
 # Manage without wadm
-def setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, limit_usage=False, url=URL):
+def setup_benchmark_env(
+    scenario,
+    wasmcloud_bin,
+    provider_reference,
+    bench_path,
+    run_id,
+    resource_profile="unlimited",
+    url=URL
+):
+    profile = RESOURCE_PROFILES[resource_profile]
     host, port = url.split("://")[1].split(":")
     port = int(port)
 
-    subprocess.run(build_systemd_cmd(f"nats-{run_id}") + [
-        "docker", "run", "-d", "--name", "nats-server",
-        "-p", "4222:4222", "-p", "8222:8222", "nats:latest", "-js"
-    ])
-    wait_for_port(host, 4222)
-    time.sleep(5)
+    # Build the systemd-run command and unit name
+    cmd, unit_name = build_systemd_cmd(
+        role="run",
+        run_id=run_id,
+        cpu_quota=profile["cpu_quota"],
+        memory_max=profile["memory_max"],
+        allowed_cpus=profile["allowed_cpus"]
+    )
 
-    subprocess.Popen(build_systemd_cmd(f"host-{run_id}", limit_usage=limit_usage) + [
-        "env",
-        "WASMCLOUD_ALLOW_FILE_LOAD=true",
-        f"WASMCLOUD_RPC_HOST={host}",
-        f"WASMCLOUD_CTL_HOST={host}",
-        wasmcloud_bin,
-        "--max-components", "10"
-    ])
-    time.sleep(20)
+    # Start a shell scope where wasmcloud is run
+    subprocess.Popen(cmd + ["bash", "-c", f"""
+        CGROUP_PARENT=$(systemctl show --property=ControlGroup --value --user {unit_name});
+        docker run --cgroup-parent=$CGROUP_PARENT -d --name nats-server -p 4222:4222 -p 8222:8222 nats:latest -js;
+        sleep 30;
+        WASMCLOUD_ALLOW_FILE_LOAD=true \
+        WASMCLOUD_RPC_HOST={host} \
+        WASMCLOUD_CTL_HOST={host} \
+        {wasmcloud_bin} --max-components 10
+    """])
+
+    # Wait for NATS and wasmcloud to be ready
+    wait_for_port(host, 4222)
+    time.sleep(60)
 
     subprocess.run([WASH, "start", "provider", provider_reference, "http-server"])
     time.sleep(2)
@@ -145,7 +223,7 @@ def setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path,
         subprocess.run([WASH, "start", "component", f"{bench_path}/wasmCloud_benchmark/http-hello2/build/http_hello_world_s.wasm", "http"])
         subprocess.run([WASH, "start", "component", f"{bench_path}/wasmCloud_benchmark/pong/build/pong_s.wasm", "pong"])
 
-    wait_for_port(host, port, timeout=15)
+    # wait_for_port(host, port)
     warm_up(url)
 
 
@@ -304,9 +382,10 @@ def monitor_and_record_resource_usage(
     output_csv,
     concurrency=1,
     use_vegeta=False,
+    resource_profile="unlimited",
     config=CONFIG
 ):
-    setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, limit_usage=LIMIT_RESOURCE_USAGE)
+    setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, resource_profile=resource_profile)
     stop_event = ThreadEvent()
     samples = []
 
@@ -373,7 +452,7 @@ def benchmark_throughput_latency(scenario, wasmcloud_bin, provider_reference, co
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for run_id in range(1, NUM_OF_RUNS + 1):
             print(f"Running scenario={scenario} size={size} run={run_id}")
-            setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, limit_usage=LIMIT_RESOURCE_USAGE)
+            setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, resource_profile="under_load")
 
             result = run_hey(scenario, size, run_id, UNDER_LOAD_CONCURRENCY, config=CONFIG)
             if result:
@@ -396,7 +475,8 @@ def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, reques
                 run_id=run_id,
                 request_rate=request_rate,
                 concurrency=1,
-                output_csv=RESOURCE_VS_PAYLOAD_SIZE_CSV
+                output_csv=RESOURCE_VS_PAYLOAD_SIZE_CSV,
+                resource_profile="under_load",
                 config=CONFIG
             )
 
@@ -406,7 +486,7 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, requ
         bench_path = BENCH_DIR_TEMPLATE.format(size)
 
         for run_id in range(1, NUM_OF_RUNS + 1):
-            setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, limit_usage=LIMIT_RESOURCE_USAGE)
+            setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, resource_profile="baseline")
             result = run_hey(
                 scenario=scenario,
                 payload_size=size,
@@ -444,6 +524,7 @@ def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_referen
                     request_rate=request_rate,
                     output_csv=RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV,
                     use_vegeta=True,
+                    resource_profile="under_load",
                     config=CONFIG
                 )
 
