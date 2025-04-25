@@ -109,8 +109,8 @@ def get_cgroup_path(unit_name):
 def get_systemd_unit_name(role: str, run_id: int | str):
     return f"wasmbench-{role}-{run_id}"
 
-def build_systemd_cmd(role=None, run_id=None, cpu_quota=None, memory_max=None, allowed_cpus=None):
-    unit_name = get_systemd_unit_name(role or "bench", run_id or uuid.uuid4().hex[:8])
+def build_systemd_cmd(role=None, scenario=None, cpu_quota=None, memory_max=None, allowed_cpus=None):
+    unit_name = get_systemd_unit_name(role or "bench", scenario or uuid.uuid4().hex[:8])
 
     cmd = ["systemd-run", "--user", "--scope", f"--unit={unit_name}", "-p", "Delegate=yes"]
 
@@ -160,37 +160,32 @@ def warm_up(url):
 
 
 # Manage without wadm
-def shutdown_benchmark_env(scenario, run_id=None):
-    aliases = {"bypass": ["http", "pong"], "nats": ["http", "pong"], "composed": ["composed"]}.get(scenario, [])
-    for alias in aliases:
-        subprocess.run([WASH, "stop", "component", alias], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run([WASH, "stop", "provider", "http-server"], stdout=subprocess.DEVNULL)
-    subprocess.run([WASH, "link", "del", "http-server", "wasi", "http"], stdout=subprocess.DEVNULL)
-    subprocess.run([WASH, "link", "del", "http", "example", "pong"], stdout=subprocess.DEVNULL)
+def shutdown_scenario_env(scenario, run_id=None):
     subprocess.run(["pkill", "-f", "wasmcloud"], stdout=subprocess.DEVNULL)
     time.sleep(10)
     subprocess.run(["docker", "rm", "-f", "/nats-server"], stdout=subprocess.DEVNULL)
     time.sleep(2)
 
 
+def stop_benchmark_components_and_remove_links(scenario):
+    aliases = {"bypass": ["http", "pong"], "nats": ["http", "pong"], "composed": ["composed"]}.get(scenario, [])
+    for alias in aliases:
+        subprocess.run([WASH, "stop", "component", alias], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([WASH, "link", "del", "http-server", "wasi", "http"], stdout=subprocess.DEVNULL)
+    subprocess.run([WASH, "link", "del", "http", "example", "pong"], stdout=subprocess.DEVNULL)
+    time.sleep(2)
+
+
 # Manage without wadm
-def setup_benchmark_env(
-    scenario,
-    wasmcloud_bin,
-    provider_reference,
-    bench_path,
-    run_id,
-    resource_profile="unlimited",
-    url=URL
-):
+# Setup host, NATS server, and provider once for the scenario
+def setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="unlimited", url=URL):
     profile = RESOURCE_PROFILES[resource_profile]
-    host, port = url.split("://")[1].split(":")
-    port = int(port)
+    host, _ = url.split("://")[1].split(":")
 
     # Build the systemd-run command and unit name
     cmd, unit_name = build_systemd_cmd(
         role="run",
-        run_id=run_id,
+        scenario=scenario,
         cpu_quota=profile["cpu_quota"],
         memory_max=profile["memory_max"],
         allowed_cpus=profile["allowed_cpus"]
@@ -214,6 +209,13 @@ def setup_benchmark_env(
     subprocess.run([WASH, "start", "provider", provider_reference, "http-server"])
     time.sleep(2)
 
+
+# Manage without wadm
+# Start scenario-specific components and links
+def setup_benchmark_components_and_links(scenario, bench_path, url=URL):
+    host, port = url.split("://")[1].split(":")
+    port = int(port)
+
     if scenario == "composed":
         subprocess.run([WASH, "link", "put", "--interface", "incoming-handler", "http-server", "composed", "wasi", "http"])
         subprocess.run([WASH, "start", "component", f"{bench_path}/wasmCloud_benchmark/composed.wasm", "composed"])
@@ -223,8 +225,7 @@ def setup_benchmark_env(
         subprocess.run([WASH, "start", "component", f"{bench_path}/wasmCloud_benchmark/http-hello2/build/http_hello_world_s.wasm", "http"])
         subprocess.run([WASH, "start", "component", f"{bench_path}/wasmCloud_benchmark/pong/build/pong_s.wasm", "pong"])
 
-    # wait_for_port(host, port)
-    warm_up(url)
+    wait_for_port(host, port)
 
 
 def parse_hey_output(output):
@@ -385,7 +386,6 @@ def monitor_and_record_resource_usage(
     resource_profile="unlimited",
     config=CONFIG
 ):
-    setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, resource_profile=resource_profile)
     stop_event = ThreadEvent()
     samples = []
 
@@ -443,29 +443,35 @@ def monitor_and_record_resource_usage(
 
         write_result(output_csv, headers, row)
 
-    shutdown_benchmark_env(scenario)
-
 
 # ================== BENCHMARK MODES ==================
-def benchmark_throughput_latency(scenario, wasmcloud_bin, provider_reference, config=CONFIG):
+def benchmark_throughput_latency(scenario, wasmcloud_bin, provider_reference, url=URL, config=CONFIG):
+    setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="under_load")
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for run_id in range(1, NUM_OF_RUNS + 1):
             print(f"Running scenario={scenario} size={size} run={run_id}")
-            setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, resource_profile="under_load")
+            setup_benchmark_components_and_links(scenario, bench_path)
+            warm_up(url)
 
             result = run_hey(scenario, size, run_id, UNDER_LOAD_CONCURRENCY, config=CONFIG)
             if result:
                 throughput, latency = result
                 write_result(THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV, ["scenario", "payload_size", "run_id", "throughput", "avg_latency_ms"], [scenario, size, run_id, throughput, latency])
-            shutdown_benchmark_env(scenario)
+            stop_benchmark_components_and_remove_links(scenario)
+
+    shutdown_scenario_env(scenario)
 
 
-def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, request_rate=10, config=CONFIG):
+def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, request_rate=10, url=URL, config=CONFIG):
+    setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="under_load")
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for run_id in range(1, NUM_OF_RUNS + 1):
             print(f"Resource profiling scenario={scenario} size={size} run={run_id}")
+            setup_benchmark_components_and_links(scenario, bench_path)
+            warm_up(url)
+
             monitor_and_record_resource_usage(
                 wasmcloud_bin=wasmcloud_bin,
                 provider_reference=provider_reference,
@@ -479,14 +485,19 @@ def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, reques
                 resource_profile="under_load",
                 config=CONFIG
             )
+            stop_benchmark_components_and_remove_links(scenario)
+
+    shutdown_scenario_env(scenario)
 
 
-def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, request_rate=10, config=CONFIG):
+def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, request_rate=10, url=URL, config=CONFIG):
+    setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="baseline")
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
-
         for run_id in range(1, NUM_OF_RUNS + 1):
-            setup_benchmark_env(scenario, wasmcloud_bin, provider_reference, bench_path, run_id, resource_profile="baseline")
+            setup_benchmark_components_and_links(scenario, bench_path)
+            warm_up(url)
+
             result = run_hey(
                 scenario=scenario,
                 payload_size=size,
@@ -502,18 +513,23 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, requ
                     ["scenario", "payload_size", "run_id", "avg_latency_ms"],
                     [scenario, size, run_id, latency]
                 )
+            stop_benchmark_components_and_remove_links(scenario)
 
-        shutdown_benchmark_env(scenario)
+    shutdown_scenario_env(scenario)
 
 
-def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_reference, config=CONFIG):
-    sizes = [0, 65536]
+def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_reference, url=URL, config=CONFIG):
+    sizes = [0, 1024]
+    setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="under_load")
 
     for size in sizes:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for request_rate in REQUEST_RATES:
             for run_id in range(1, NUM_OF_RUNS + 1):
                 print(f"Resource vs Request Rate scenario={scenario} size={size} request_rate={request_rate} run={run_id}")
+                setup_benchmark_components_and_links(scenario, bench_path)
+                warm_up(url)
+
                 monitor_and_record_resource_usage(
                     wasmcloud_bin=wasmcloud_bin,
                     provider_reference=provider_reference,
@@ -527,6 +543,9 @@ def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_referen
                     resource_profile="under_load",
                     config=CONFIG
                 )
+                stop_benchmark_components_and_remove_links(scenario)
+
+    shutdown_scenario_env(scenario)
 
 
 # ========================= MAIN =========================
@@ -546,10 +565,10 @@ def main():
             os.remove(f)
 
     for scenario, wasmcloud_bin in [("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS), ("bypass", WASMCLOUD_BYPASS)]:
-        #benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, config=CONFIG)
-        #benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, config=CONFIG)
-        benchmark_resource_usage(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, config=CONFIG)
-        benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, config=CONFIG)
+        benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        benchmark_resource_usage(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
 
 
 if __name__ == "__main__":
