@@ -40,33 +40,33 @@ CONFIG = {
     "save_load_generator_output": False
 }
 
-RESOURCE_PROFILES = {
-    "unlimited": {
-        "cpu_quota": None,           # No CPU limit
-        "allowed_cpus": None,        # No core pinning (can float across all CPUs)
-        "memory_max": None           # No memory limit
-    },
-    "baseline": {
-        "cpu_quota": None,          # No CPU limit
-        "allowed_cpus": "0",        # Single physical core
-        "memory_max": None          # No memory limit
-    },
-    "under_load": {
-        "cpu_quota": "100%",        # Full CPU access
-        "allowed_cpus": "0,1",      # Two physical cores
-        "memory_max": "1024M"
-    },
-    "constrained": {
-        "cpu_quota": "50%",         # Half CPU time
-        "allowed_cpus": "0,1",      # Both cores, limited slice
-        "memory_max": "1024M"
-    },
-    "stress": {
-        "cpu_quota": "50%",         # Constrained with fewer cores
-        "allowed_cpus": "0",        # One core
-        "memory_max": "512M"
-    }
-}
+# RESOURCE_PROFILES = {
+#     "unlimited": {
+#         "cpu_quota": None,           # No CPU limit
+#         "allowed_cpus": None,        # No core pinning (can float across all CPUs)
+#         "memory_max": None           # No memory limit
+#     },
+#     "baseline": {
+#         "cpu_quota": None,          # No CPU limit
+#         "allowed_cpus": "0",        # Single physical core
+#         "memory_max": None          # No memory limit
+#     },
+#     "under_load": {
+#         "cpu_quota": "100%",        # Full CPU access
+#         "allowed_cpus": "0,1",      # Two physical cores
+#         "memory_max": "1024M"
+#     },
+#     "constrained": {
+#         "cpu_quota": "50%",         # Half CPU time
+#         "allowed_cpus": "0,1",      # Both cores, limited slice
+#         "memory_max": "1024M"
+#     },
+#     "stress": {
+#         "cpu_quota": "50%",         # Constrained with fewer cores
+#         "allowed_cpus": "0",        # One core
+#         "memory_max": "512M"
+#     }
+# }
 
 
 # ================== UTILS ==================
@@ -81,47 +81,11 @@ def wait_for_port(host, port, timeout=60):
     raise TimeoutError(f"Port {port} not available after {timeout}s")
 
 
-def build_systemd_cmd(suffix=None, run_id=None, cpu_quota=None, memory_max=None, allowed_cpus=None):
-    if run_id is not None:
-        unit_name = get_systemd_unit_name(suffix or "bench", run_id)
-    else:
-        unit_name = f"wasmbench-{suffix or uuid.uuid4().hex[:8]}"
+def build_systemd_cmd(suffix=None):
+    unit_name = f"wasmbench-{suffix or uuid.uuid4().hex[:8]}"
+    cmd = ["systemd-run", "--user", "--scope", f"--unit={unit_name}"]
 
-    cmd = ["systemd-run", "--user", "--scope", f"--unit={unit_name}", "-p", "Delegate=yes"]
-
-    if cpu_quota is not None:
-        cmd += ["-p", f"CPUQuota={cpu_quota}"]
-    if memory_max is not None:
-        cmd += ["-p", f"MemoryMax={memory_max}"]
-    if allowed_cpus is not None:
-        cmd += ["-p", f"AllowedCPUs={allowed_cpus}"]
-    return cmd, unit_name
-
-
-def get_cgroup_path(unit_name):
-    result = subprocess.run(
-        ["systemctl", "show", "--user", f"--property=ControlGroup", f"--unit={unit_name}"],
-        capture_output=True, text=True, check=True
-    )
-    return result.stdout.strip().split("=")[1]
-
-
-def get_systemd_unit_name(role: str, run_id: int | str):
-    return f"wasmbench-{role}-{run_id}"
-
-def build_systemd_cmd(role=None, scenario=None, cpu_quota=None, memory_max=None, allowed_cpus=None):
-    unit_name = get_systemd_unit_name(role or "bench", scenario or uuid.uuid4().hex[:8])
-
-    cmd = ["systemd-run", "--user", "--scope", f"--unit={unit_name}", "-p", "Delegate=yes"]
-
-    if cpu_quota is not None:
-        cmd += ["-p", f"CPUQuota={cpu_quota}"]
-    if memory_max is not None:
-        cmd += ["-p", f"MemoryMax={memory_max}"]
-    if allowed_cpus is not None:
-        cmd += ["-p", f"AllowedCPUs={allowed_cpus}"]
-
-    return cmd, unit_name
+    return cmd
 
 
 def write_result(path, headers, row):
@@ -178,33 +142,25 @@ def stop_benchmark_components_and_remove_links(scenario):
 
 # Manage without wadm
 # Setup host, NATS server, and provider once for the scenario
-def setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="unlimited", url=URL):
-    profile = RESOURCE_PROFILES[resource_profile]
+def setup_scenario_env(scenario, wasmcloud_bin, provider_reference, url=URL):
     host, _ = url.split("://")[1].split(":")
 
-    # Build the systemd-run command and unit name
-    cmd, unit_name = build_systemd_cmd(
-        role="run",
-        scenario=scenario,
-        cpu_quota=profile["cpu_quota"],
-        memory_max=profile["memory_max"],
-        allowed_cpus=profile["allowed_cpus"]
-    )
-
-    # Start a shell scope where wasmcloud is run
-    subprocess.Popen(cmd + ["bash", "-c", f"""
-        CGROUP_PARENT=$(systemctl show --property=ControlGroup --value --user {unit_name});
-        docker run --cgroup-parent=$CGROUP_PARENT -d --name nats-server -p 4222:4222 -p 8222:8222 nats:latest -js;
-        sleep 30;
-        WASMCLOUD_ALLOW_FILE_LOAD=true \
-        WASMCLOUD_RPC_HOST={host} \
-        WASMCLOUD_CTL_HOST={host} \
-        {wasmcloud_bin} --max-components 10
-    """])
-
-    # Wait for NATS and wasmcloud to be ready
+    subprocess.run(build_systemd_cmd(f"{scenario}-nats") + [
+        "docker", "run", "-d", "--name", "nats-server",
+        "-p", "4222:4222", "-p", "8222:8222", "nats:latest", "-js"
+    ])
     wait_for_port(host, 4222)
-    time.sleep(60)
+    time.sleep(5)
+
+    subprocess.Popen(build_systemd_cmd(f"{scenario}-host") + [
+        "env",
+        "WASMCLOUD_ALLOW_FILE_LOAD=true",
+        f"WASMCLOUD_RPC_HOST={host}",
+        f"WASMCLOUD_CTL_HOST={host}",
+        wasmcloud_bin,
+        "--max-components", "10"
+    ])
+    time.sleep(20)
 
     subprocess.run([WASH, "start", "provider", provider_reference, "http-server"])
     time.sleep(2)
@@ -383,7 +339,6 @@ def monitor_and_record_resource_usage(
     output_csv,
     concurrency=1,
     use_vegeta=False,
-    resource_profile="unlimited",
     config=CONFIG
 ):
     stop_event = ThreadEvent()
@@ -446,7 +401,7 @@ def monitor_and_record_resource_usage(
 
 # ================== BENCHMARK MODES ==================
 def benchmark_throughput_latency(scenario, wasmcloud_bin, provider_reference, url=URL, config=CONFIG):
-    setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="under_load")
+    setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for run_id in range(1, NUM_OF_RUNS + 1):
@@ -464,7 +419,7 @@ def benchmark_throughput_latency(scenario, wasmcloud_bin, provider_reference, ur
 
 
 def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, request_rate=10, url=URL, config=CONFIG):
-    setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="under_load")
+    setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for run_id in range(1, NUM_OF_RUNS + 1):
@@ -482,7 +437,6 @@ def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, reques
                 request_rate=request_rate,
                 concurrency=1,
                 output_csv=RESOURCE_VS_PAYLOAD_SIZE_CSV,
-                resource_profile="under_load",
                 config=CONFIG
             )
             stop_benchmark_components_and_remove_links(scenario)
@@ -491,7 +445,7 @@ def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, reques
 
 
 def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, request_rate=10, url=URL, config=CONFIG):
-    setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="baseline")
+    setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
     for size in PAYLOAD_SIZES:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for run_id in range(1, NUM_OF_RUNS + 1):
@@ -520,7 +474,7 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, requ
 
 def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_reference, url=URL, config=CONFIG):
     sizes = [0, 1024]
-    setup_scenario_env(scenario, wasmcloud_bin, provider_reference, resource_profile="under_load")
+    setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
 
     for size in sizes:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
@@ -540,7 +494,6 @@ def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_referen
                     request_rate=request_rate,
                     output_csv=RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV,
                     use_vegeta=True,
-                    resource_profile="under_load",
                     config=CONFIG
                 )
                 stop_benchmark_components_and_remove_links(scenario)
@@ -565,8 +518,8 @@ def main():
             os.remove(f)
 
     for scenario, wasmcloud_bin in [("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS), ("bypass", WASMCLOUD_BYPASS)]:
-        benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
-        benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        #benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        #benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
         benchmark_resource_usage(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
         benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
 
