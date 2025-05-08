@@ -28,9 +28,9 @@ from paths import (
 
 
 # Benchmark settings
-PAYLOAD_SIZES = [0, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+PAYLOAD_SIZES = ["0K", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M", "4M", "8M", "16M", "32M"]
 #PAYLOAD_SIZES = [0, 512]
-REQUEST_RATES = [10, 50, 100, 200, 500]
+REQUEST_RATES = [10, 50, 100, 150, 200]
 NUM_OF_RUNS = 10
 REQUESTS_SENDING_DURATION = "3s"
 UNDER_LOAD_CONCURRENCY = 5
@@ -473,7 +473,7 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, requ
 
 
 def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_reference, url=URL, config=CONFIG):
-    sizes = [0, 1024]
+    sizes = ["0K", "256K", "512K"]
     setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
 
     for size in sizes:
@@ -518,8 +518,8 @@ def main():
             os.remove(f)
 
     for scenario, wasmcloud_bin in [("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS), ("bypass", WASMCLOUD_BYPASS)]:
-        #benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
-        #benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
         benchmark_resource_usage(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
         benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
 

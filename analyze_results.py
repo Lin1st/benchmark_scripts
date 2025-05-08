@@ -43,7 +43,11 @@ def compute_confidence_interval(std, n, conf_level, method):
 
 
 def summarize(df, value_col, conf_level, method):
-    summary = df.groupby(["scenario", "payload_size"]).agg(
+    # Define the correct order for payload sizes
+    payload_order = ["0K", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M", "4M", "8M", "16M", "32M", "64M"]
+    df["payload_size"] = pd.Categorical(df["payload_size"], categories=payload_order, ordered=True)
+
+    summary = df.groupby(["scenario", "payload_size"], observed=True).agg(
         mean_val=(value_col, "mean"),
         std_val=(value_col, "std"),
         count=(value_col, "count")
@@ -123,6 +127,10 @@ def plot_baseline_and_combined(baseline_df, stress_df):
         baseline_df[["scenario", "payload_size", "avg_latency_ms", "condition"]]
     ])
 
+    # Define the correct order for payload sizes
+    payload_order = ["0K", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M", "4M", "8M", "16M", "32M", "64M"]
+    combined_df["payload_size"] = pd.Categorical(combined_df["payload_size"], categories=payload_order, ordered=True)
+
     # Baseline Latency
     baseline_summary = summarize(baseline_df, "avg_latency_ms", CONF_LEVEL, CI_METHOD)
     plot_with_ci_grouped(
@@ -135,7 +143,7 @@ def plot_baseline_and_combined(baseline_df, stress_df):
     )
 
     # Combined Latency (baseline + under stress)
-    combined_summary = combined_df.groupby(["scenario", "payload_size", "condition"]).agg(
+    combined_summary = combined_df.groupby(["scenario", "payload_size", "condition"], observed=True).agg(
         mean_val=("avg_latency_ms", "mean"),
         std_val=("avg_latency_ms", "std"),
         count=("avg_latency_ms", "count")
@@ -227,7 +235,8 @@ def plot_latency_vs_request_rate(resource_vs_request_rate_df):
         x_col="request_rate",
         y_label="Latency (ms)",
         title="Latency vs Request Rate",
-        output_file=OUTPUT_IMG_LATENCY_VS_REQUEST_RATE
+        output_file=OUTPUT_IMG_LATENCY_VS_REQUEST_RATE,
+        y_log_scale=True
     )
 
 
