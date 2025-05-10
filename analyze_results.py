@@ -42,12 +42,15 @@ def compute_confidence_interval(std, n, conf_level, method):
     return critical_value * std / (n ** 0.5)
 
 
-def summarize(df, value_col, conf_level, method):
+def summarize(df, value_col, conf_level, method, group_cols=None):
     # Define the correct order for payload sizes
     payload_order = ["0K", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M", "4M", "8M", "16M", "32M", "64M"]
     df["payload_size"] = pd.Categorical(df["payload_size"], categories=payload_order, ordered=True)
 
-    summary = df.groupby(["scenario", "payload_size"], observed=True).agg(
+    if group_cols is None:
+        group_cols = ["scenario", "payload_size"]
+
+    summary = df.groupby(group_cols, observed=True).agg(
         mean_val=(value_col, "mean"),
         std_val=(value_col, "std"),
         count=(value_col, "count")
@@ -64,7 +67,7 @@ def plot_with_ci_grouped(summary_df, group_cols, x_col, y_label, title, output_f
     plt.figure(figsize=(10, 6))
     sns.set(style="whitegrid")
 
-    for group_keys, sub_df in summary_df.groupby(group_cols):
+    for group_keys, sub_df in summary_df.groupby(group_cols, observed=True):
         label = group_keys if isinstance(group_keys, str) else " | ".join(str(k) for k in group_keys)
         linestyle = "dashed" if "0b" in label.lower() or "baseline" in label.lower() else "solid"
 
@@ -87,7 +90,6 @@ def plot_with_ci_grouped(summary_df, group_cols, x_col, y_label, title, output_f
     plt.tight_layout()
     plt.savefig(output_file)
     plt.close()
-
 
 
 # ================== PLOTS ==================
@@ -165,7 +167,55 @@ def plot_baseline_and_combined(baseline_df, stress_df):
 
 
 # CPU and Memory Usage
-def plot_resource_usage(resource_df):
+def plot_resource_usage(resource_df, include_pss=True):
+    # Normalize column names to ensure case consistency
+    resource_df.columns = resource_df.columns.str.strip().str.lower()
+
+    required_columns = {"rss_mib", "cpu_percent"}
+    if include_pss:
+        required_columns.add("pss_mib")
+    if not required_columns.issubset(resource_df.columns):
+        print(f"Missing required columns for resource usage: {required_columns - set(resource_df.columns)}")
+        return
+
+    # Plot RSS (and optionally PSS)
+    if include_pss:
+        # Reshape the data to include a "metric" column for PSS and RSS
+        memory_df = pd.melt(
+            resource_df,
+            id_vars=["scenario", "payload_size"],
+            value_vars=["pss_mib", "rss_mib"],
+            var_name="metric",
+            value_name="memory_mib"
+        )
+
+        # Combine "scenario" and "metric" into a single group for plotting
+        memory_df["scenario"] = memory_df["scenario"] + " | " + memory_df["metric"].str.upper()
+
+        # Use the summarize function to compute statistics
+        memory_summary = summarize(memory_df, "memory_mib", CONF_LEVEL, CI_METHOD)
+
+        plot_with_ci_grouped(
+            memory_summary,
+            group_cols=["scenario"],
+            x_col="payload_size",
+            y_label="Memory Usage (MiB)",
+            title="Memory Usage (PSS and RSS) vs Payload Size",
+            output_file=OUTPUT_IMG_MEM_USAGE_VS_PAYLOAD_SIZE
+        )
+    else:
+        # Plot only RSS
+        rss_summary = summarize(resource_df, "rss_mib", CONF_LEVEL, CI_METHOD)
+        plot_with_ci_grouped(
+            rss_summary,
+            group_cols=["scenario"],
+            x_col="payload_size",
+            y_label="Memory Usage (MiB)",
+            title="Memory Usage (RSS) vs Payload Size",
+            output_file=OUTPUT_IMG_MEM_USAGE_VS_PAYLOAD_SIZE
+        )
+
+    # Plot CPU usage
     cpu_summary = summarize(resource_df, "cpu_percent", CONF_LEVEL, CI_METHOD)
     plot_with_ci_grouped(
         cpu_summary,
@@ -176,48 +226,62 @@ def plot_resource_usage(resource_df):
         output_file=OUTPUT_IMG_CPU_USAGE_VS_PAYLOAD_SIZE
     )
 
-    mem_summary = summarize(resource_df, "memory_mib", CONF_LEVEL, CI_METHOD)
+
+def plot_resource_vs_request_rate(resource_vs_request_rate_df, include_pss=True):
+    # Normalize column names to ensure case consistency
+    resource_vs_request_rate_df.columns = resource_vs_request_rate_df.columns.str.strip().str.lower()
+
+    # print("Normalized column names:", resource_vs_request_rate_df.columns.tolist())
+
+    required_columns = {"rss_mib", "cpu_percent", "request_rate"}
+    if include_pss:
+        required_columns.add("pss_mib")
+    if not required_columns.issubset(resource_vs_request_rate_df.columns):
+        print(f"Missing required columns for resource usage: {required_columns - set(resource_vs_request_rate_df.columns)}")
+        return
+
+    # Plot CPU usage
+    cpu_summary = summarize(resource_vs_request_rate_df, "cpu_percent", CONF_LEVEL, CI_METHOD, group_cols=["scenario", "payload_size", "request_rate"])
     plot_with_ci_grouped(
-        mem_summary,
-        group_cols=["scenario"],
-        x_col="payload_size",
-        y_label="Memory Usage (MiB)",
-        title="Memory Usage vs Payload Size",
-        output_file=OUTPUT_IMG_MEM_USAGE_VS_PAYLOAD_SIZE
+        cpu_summary,
+        group_cols=["scenario", "payload_size"],
+        x_col="request_rate",
+        y_label="CPU Usage (%)",
+        title="CPU Usage vs Request Rate",
+        output_file=OUTPUT_IMG_CPU_USAGE_VS_REQUEST_RATE
     )
 
-
-def plot_resource_vs_request_rate(resource_vs_request_rate_df):
-    for metric, y_label, output_file in [
-        ("cpu_percent", "CPU Usage (%)", OUTPUT_IMG_CPU_USAGE_VS_REQUEST_RATE),
-        ("memory_mib", "Memory Usage (MiB)", OUTPUT_IMG_MEM_USAGE_VS_REQUEST_RATE)
-    ]:
-        summary = resource_vs_request_rate_df.groupby(
-            ["scenario", "payload_size", "request_rate"]
-        ).agg(
-            mean_val=(metric, "mean"),
-            std_val=(metric, "std"),
-            count=(metric, "count")
-        ).reset_index()
-
-        summary["ci"] = summary.apply(
-            lambda row: compute_confidence_interval(row["std_val"], row["count"], CONF_LEVEL, CI_METHOD),
-            axis=1
-        )
-
+    # Plot memory usage (RSS and optionally PSS)
+    if include_pss:
+        for metric, y_label, output_file in [
+            ("pss_mib", "PSS Memory Usage (MiB)", OUTPUT_IMG_MEM_USAGE_VS_REQUEST_RATE),
+            ("rss_mib", "RSS Memory Usage (MiB)", OUTPUT_IMG_MEM_USAGE_VS_REQUEST_RATE)
+        ]:
+            memory_summary = summarize(resource_vs_request_rate_df, metric, CONF_LEVEL, CI_METHOD, group_cols=["scenario", "payload_size", "request_rate"])
+            plot_with_ci_grouped(
+                memory_summary,
+                group_cols=["scenario", "payload_size"],
+                x_col="request_rate",
+                y_label=y_label,
+                title=f"{y_label} vs Request Rate",
+                output_file=output_file
+            )
+    else:
+        # Plot only RSS
+        rss_summary = summarize(resource_vs_request_rate_df, "rss_mib", CONF_LEVEL, CI_METHOD, group_cols=["scenario", "payload_size", "request_rate"])
         plot_with_ci_grouped(
-            summary,
+            rss_summary,
             group_cols=["scenario", "payload_size"],
             x_col="request_rate",
-            y_label=y_label,
-            title=f"{y_label} vs Request Rate",
-            output_file=output_file
+            y_label="Memory Usage (MiB)",
+            title="Memory Usage vs Request Rate",
+            output_file=OUTPUT_IMG_MEM_USAGE_VS_REQUEST_RATE
         )
 
 
 def plot_latency_vs_request_rate(resource_vs_request_rate_df):
     latency_summary = resource_vs_request_rate_df.groupby(
-        ["scenario", "payload_size", "request_rate"]
+        ["scenario", "payload_size", "request_rate"], observed=True
     ).agg(
         mean_val=("avg_latency_ms", "mean"),
         std_val=("avg_latency_ms", "std"),
@@ -242,9 +306,9 @@ def plot_latency_vs_request_rate(resource_vs_request_rate_df):
 
 # ========================= MAIN =========================
 def main():
-    df = pd.read_csv(THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV )
-    plot_throughput(df)
-    plot_latency_under_stress(df)
+    #df = pd.read_csv(THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV )
+    #plot_throughput(df)
+    #plot_latency_under_stress(df)
 
     if os.path.exists(BASELINE_LATENCY_CSV):
         baseline_df = pd.read_csv(BASELINE_LATENCY_CSV)

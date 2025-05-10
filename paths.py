@@ -1,5 +1,6 @@
 # paths.py
 from pathlib import Path
+import os
 
 
 ROOT_DIR = Path(__file__).parent.resolve()
@@ -28,7 +29,9 @@ OUTPUT_IMG_MEM_USAGE_VS_REQUEST_RATE = PLOTS_DIR / "mem_usage_vs_request_rate.pn
 OUTPUT_IMG_LATENCY_VS_REQUEST_RATE = PLOTS_DIR / "latency_vs_request_rate.png"
 
 #  External benchmark directory template
-BENCH_DIR_TEMPLATE = str(Path.home() / "Desktop" / "bench_{}iB")
+#BENCH_DIR_TEMPLATE = str(Path.home() / "Desktop" / "bench_{}iB")
+user_home = Path(os.path.expanduser(f"~{os.getenv('SUDO_USER', os.getenv('USER'))}"))
+BENCH_DIR_TEMPLATE = str(user_home / "Desktop" / "bench_{}iB")
 
 # External binary paths
 WASMCLOUD_NATS = Path("/home/lin/Desktop/wasmCloud_nats/wasmCloud_first_try/target/release/wasmcloud")

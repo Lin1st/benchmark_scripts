@@ -30,8 +30,8 @@ from paths import (
 # Benchmark settings
 PAYLOAD_SIZES = ["0K", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M", "4M", "8M", "16M", "32M"]
 #PAYLOAD_SIZES = [0, 512]
-REQUEST_RATES = [10, 50, 100, 150, 200]
-NUM_OF_RUNS = 10
+REQUEST_RATES = [10, 20, 50, 100, 150]
+NUM_OF_RUNS = 20
 REQUESTS_SENDING_DURATION = "3s"
 UNDER_LOAD_CONCURRENCY = 5
 RESOURCE_SAMPLE_INTERVAL = 0.5
@@ -81,13 +81,6 @@ def wait_for_port(host, port, timeout=60):
     raise TimeoutError(f"Port {port} not available after {timeout}s")
 
 
-def build_systemd_cmd(suffix=None):
-    unit_name = f"wasmbench-{suffix or uuid.uuid4().hex[:8]}"
-    cmd = ["systemd-run", "--user", "--scope", f"--unit={unit_name}"]
-
-    return cmd
-
-
 def write_result(path, headers, row):
     first_write = not os.path.exists(path) or os.path.getsize(path) == 0
     with open(path, "a", newline="") as f:
@@ -123,12 +116,20 @@ def warm_up(url):
     raise RuntimeError(f"Warm-up HTTP request failed repeatedly (no 200 OK from {url})")
 
 
+def build_systemd_cmd(suffix=None):
+    unit_name = f"wasmbench-{suffix or uuid.uuid4().hex[:8]}"
+    cmd = ["systemd-run", "--user", "--scope", f"--unit={unit_name}"]
+    return cmd
+
+
 # Manage without wadm
 def shutdown_scenario_env(scenario, run_id=None):
+    # Use pkill to stop wasmCloud and systemd to clean up
     subprocess.run(["pkill", "-f", "wasmcloud"], stdout=subprocess.DEVNULL)
     time.sleep(10)
     subprocess.run(["docker", "rm", "-f", "/nats-server"], stdout=subprocess.DEVNULL)
     time.sleep(2)
+    subprocess.run(["systemctl", "--user", "reset-failed"], stdout=subprocess.DEVNULL)
 
 
 def stop_benchmark_components_and_remove_links(scenario):
@@ -142,26 +143,49 @@ def stop_benchmark_components_and_remove_links(scenario):
 
 # Manage without wadm
 # Setup host, NATS server, and provider once for the scenario
-def setup_scenario_env(scenario, wasmcloud_bin, provider_reference, url=URL):
+def setup_scenario_env(scenario, wasmcloud_bin, provider_reference, url=URL, include_pss=True):
     host, _ = url.split("://")[1].split(":")
 
-    subprocess.run(build_systemd_cmd(f"{scenario}-nats") + [
-        "docker", "run", "-d", "--name", "nats-server",
-        "-p", "4222:4222", "-p", "8222:8222", "nats:latest", "-js"
-    ])
+    # Start the NATS server
+    if include_pss:
+        # Directly run the command without wrapping
+        subprocess.run([
+            "docker", "run", "-d", "--name", "nats-server",
+            "-p", "4222:4222", "-p", "8222:8222", "nats:latest", "-js"
+        ])
+    else:
+        # Wrap with systemd for process management
+        subprocess.run(build_systemd_cmd(f"{scenario}-nats") + [
+            "docker", "run", "-d", "--name", "nats-server",
+            "-p", "4222:4222", "-p", "8222:8222", "nats:latest", "-js"
+        ])
     wait_for_port(host, 4222)
     time.sleep(5)
 
-    subprocess.Popen(build_systemd_cmd(f"{scenario}-host") + [
-        "env",
-        "WASMCLOUD_ALLOW_FILE_LOAD=true",
-        f"WASMCLOUD_RPC_HOST={host}",
-        f"WASMCLOUD_CTL_HOST={host}",
-        wasmcloud_bin,
-        "--max-components", "10"
-    ])
+    # Start the wasmCloud host
+    if include_pss:
+        # Directly run the command without wrapping
+        subprocess.Popen([
+            "env",
+            "WASMCLOUD_ALLOW_FILE_LOAD=true",
+            f"WASMCLOUD_RPC_HOST={host}",
+            f"WASMCLOUD_CTL_HOST={host}",
+            wasmcloud_bin,
+            "--max-components", "10"
+        ])
+    else:
+        # Wrap with systemd for process management
+        subprocess.Popen(build_systemd_cmd(f"{scenario}-host") + [
+            "env",
+            "WASMCLOUD_ALLOW_FILE_LOAD=true",
+            f"WASMCLOUD_RPC_HOST={host}",
+            f"WASMCLOUD_CTL_HOST={host}",
+            wasmcloud_bin,
+            "--max-components", "10"
+        ])
     time.sleep(20)
 
+    # Start the HTTP provider
     subprocess.run([WASH, "start", "provider", provider_reference, "http-server"])
     time.sleep(2)
 
@@ -295,7 +319,7 @@ def run_vegeta(scenario=None, payload_size=None, run_id=None, request_rate=50, d
             os.remove(attack_path)
 
 
-def setup_resource_sampling():
+def setup_resource_sampling(include_pss=True):
     wasm_proc = find_named_process("wasmcloud")
     nats_proc = find_named_process("nats-server")
 
@@ -310,22 +334,27 @@ def setup_resource_sampling():
     return wasm_proc, nats_proc
 
 
-def sample_resource_snapshot(wasm_proc, nats_proc):
+def sample_resource_snapshot(wasm_proc, nats_proc, include_pss=True):
     wasm_cpu = wasm_proc.cpu_percent(interval=None)
-    wasm_mem = wasm_proc.memory_info().rss
+    wasm_rss = wasm_proc.memory_info().rss
+    wasm_pss = wasm_proc.memory_full_info().pss if include_pss else 0
 
     # wasmCloud spawns providers as separate processes
     for child in wasm_proc.children(recursive=True):
         wasm_cpu += child.cpu_percent(interval=None)
-        wasm_mem += child.memory_info().rss
+        wasm_rss += child.memory_info().rss
+        if include_pss:
+            wasm_pss += child.memory_full_info().pss
 
     nats_cpu = nats_proc.cpu_percent(interval=None)
-    nats_mem = nats_proc.memory_info().rss
+    nats_rss = nats_proc.memory_info().rss
+    nats_pss = nats_proc.memory_full_info().pss if include_pss else 0
 
     total_cpu = wasm_cpu + nats_cpu
-    total_mem_mib = (wasm_mem + nats_mem) / 1024 ** 2
+    total_rss_mib = (wasm_rss + nats_rss) / 1024 ** 2
+    total_pss_mib = (wasm_pss + nats_pss) / 1024 ** 2 if include_pss else None
 
-    return total_cpu, total_mem_mib
+    return total_cpu, total_rss_mib, total_pss_mib
 
 
 def monitor_and_record_resource_usage(
@@ -339,17 +368,18 @@ def monitor_and_record_resource_usage(
     output_csv,
     concurrency=1,
     use_vegeta=False,
+    include_pss=True,
     config=CONFIG
 ):
     stop_event = ThreadEvent()
     samples = []
 
     def sampler():
-        wasm_proc, nats_proc = setup_resource_sampling()
+        wasm_proc, nats_proc = setup_resource_sampling(include_pss)
         time.sleep(RESOURCE_SAMPLE_INTERVAL)
         while not stop_event.is_set():
-            cpu, mem = sample_resource_snapshot(wasm_proc, nats_proc)
-            samples.append((cpu, mem))
+            cpu, rss, pss = sample_resource_snapshot(wasm_proc, nats_proc, include_pss)
+            samples.append((cpu, rss, pss))
             time.sleep(RESOURCE_SAMPLE_INTERVAL)
 
     monitor_thread = Thread(target=sampler)
@@ -387,9 +417,15 @@ def monitor_and_record_resource_usage(
 
     if throughput and samples:
         cpu = sum(s[0] for s in samples) / len(samples)
-        mem = sum(s[1] for s in samples) / len(samples)
-        headers = ["scenario", "payload_size", "request_rate", "run_id", "throughput", "cpu_percent", "memory_mib"]
-        row = [scenario, size, request_rate, run_id, throughput, cpu, mem]
+        rss = sum(s[1] for s in samples) / len(samples)
+        pss = sum(s[2] for s in samples) / len(samples) if include_pss else None
+
+        headers = ["scenario", "payload_size", "request_rate", "run_id", "throughput", "cpu_percent", "rss_mib"]
+        row = [scenario, size, request_rate, run_id, throughput, cpu, rss]
+
+        if include_pss:
+            headers.append("pss_mib")
+            row.append(pss)
 
         # Only include latency if we have/need it
         if latency is not None:
@@ -473,7 +509,7 @@ def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, requ
 
 
 def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_reference, url=URL, config=CONFIG):
-    sizes = ["0K", "256K", "512K"]
+    sizes = ["0K", "512K"]
     setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
 
     for size in sizes:
@@ -518,9 +554,9 @@ def main():
             os.remove(f)
 
     for scenario, wasmcloud_bin in [("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS), ("bypass", WASMCLOUD_BYPASS)]:
-        benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
-        benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
-        benchmark_resource_usage(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        #benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        #benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        #benchmark_resource_usage(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
         benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
 
 
