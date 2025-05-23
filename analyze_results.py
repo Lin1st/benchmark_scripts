@@ -106,8 +106,8 @@ def plot_throughput(df):
     )
 
 
-# Latency (under stress)
-def plot_latency_under_stress(df):
+# Latency (under load)
+def plot_latency_under_load(df):
     latency_summary = summarize(df, "avg_latency_ms", CONF_LEVEL, CI_METHOD)
     plot_with_ci_grouped(
         latency_summary,
@@ -119,13 +119,13 @@ def plot_latency_under_stress(df):
     )
 
 
-# Latency: Baseline vs Under Stress
-def plot_baseline_and_combined(baseline_df, stress_df):
+# Latency: Baseline vs Under load
+def plot_latency_vs_payload_size(baseline_df, load_df):
     baseline_df["condition"] = "baseline"
-    stress_df["condition"] = "under_stress"
+    load_df["condition"] = "under_load"
 
     combined_df = pd.concat([
-        stress_df[["scenario", "payload_size", "avg_latency_ms", "condition"]],
+        load_df[["scenario", "payload_size", "avg_latency_ms", "condition"]],
         baseline_df[["scenario", "payload_size", "avg_latency_ms", "condition"]]
     ])
 
@@ -144,7 +144,7 @@ def plot_baseline_and_combined(baseline_df, stress_df):
         output_file=OUTPUT_IMG_BASELINE_LATENCY
     )
 
-    # Combined Latency (baseline + under stress)
+    # Combined Latency (baseline + under load)
     combined_summary = combined_df.groupby(["scenario", "payload_size", "condition"], observed=True).agg(
         mean_val=("avg_latency_ms", "mean"),
         std_val=("avg_latency_ms", "std"),
@@ -161,13 +161,13 @@ def plot_baseline_and_combined(baseline_df, stress_df):
         group_cols=["scenario", "condition"],
         x_col="payload_size",
         y_label="Latency (ms)",
-        title="Latency: Baseline vs Under Stress",
+        title="Latency: Baseline vs Under load",
         output_file=OUTPUT_IMG_COMBINED_LATENCY
     )
 
 
 # CPU and Memory Usage
-def plot_resource_usage(resource_df, include_pss=False):
+def plot_resource_vs_payload_size(resource_df, include_pss=False):
     # Normalize column names to ensure case consistency
     resource_df.columns = resource_df.columns.str.strip().str.lower()
 
@@ -308,17 +308,17 @@ def plot_latency_vs_request_rate(resource_vs_request_rate_df):
 def main():
     df = pd.read_csv(THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV )
     plot_throughput(df)
-    plot_latency_under_stress(df)
+    plot_latency_under_load(df)
 
     if os.path.exists(BASELINE_LATENCY_CSV):
         baseline_df = pd.read_csv(BASELINE_LATENCY_CSV)
-        plot_baseline_and_combined(baseline_df, df)
+        plot_latency_vs_payload_size(baseline_df, df)
     else:
         print(f"Baseline latency file '{BASELINE_LATENCY_CSV}' not found.")
         
     if os.path.exists(RESOURCE_VS_PAYLOAD_SIZE_CSV):
         resource_df = pd.read_csv(RESOURCE_VS_PAYLOAD_SIZE_CSV)
-        plot_resource_usage(resource_df)
+        plot_resource_vs_payload_size(resource_df)
     else:
         print(f"Resource usage file '{RESOURCE_VS_PAYLOAD_SIZE_CSV}' not found.")
 
