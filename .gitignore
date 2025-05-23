@@ -1,0 +1,9 @@
+__pycache__/
+myvenv/
+plots/
+baseline_latency.csv
+resource_and_latency_vs_request_rate.csv
+resource_vs_payload_size.csv
+throughput_and_latency_vs_payload_size_under_load.csv
+hey_debug_log.txt
+vegeta_debug_log.txt
