@@ -28,12 +28,11 @@ from paths import (
 
 
 # Benchmark settings
-PAYLOAD_SIZES = ["0K", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M", "4M", "8M", "16M", "32M"]
-#PAYLOAD_SIZES = [0, 512]
-REQUEST_RATES = [10, 20, 50, 100, 150]
-NUM_OF_RUNS = 20
-REQUESTS_SENDING_DURATION = "3s"
-UNDER_LOAD_CONCURRENCY = 5
+PAYLOAD_SIZES = ["0K", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M"]
+REQUEST_RATES = [10, 20, 50, 100]
+NUM_OF_RUNS = 10
+REQUESTS_SENDING_DURATION = "5s"
+UNDER_LOAD_CONCURRENCY = 10
 RESOURCE_SAMPLE_INTERVAL = 0.5
 
 CONFIG = {
@@ -171,7 +170,7 @@ def setup_scenario_env(scenario, wasmcloud_bin, provider_reference, url=URL, inc
             f"WASMCLOUD_RPC_HOST={host}",
             f"WASMCLOUD_CTL_HOST={host}",
             wasmcloud_bin,
-            "--max-components", "10"
+            "--max-components", "150"
         ])
     else:
         # Wrap with systemd for process management
@@ -181,7 +180,7 @@ def setup_scenario_env(scenario, wasmcloud_bin, provider_reference, url=URL, inc
             f"WASMCLOUD_RPC_HOST={host}",
             f"WASMCLOUD_CTL_HOST={host}",
             wasmcloud_bin,
-            "--max-components", "10"
+            "--max-components", "150"
         ])
     time.sleep(20)
 
@@ -368,7 +367,7 @@ def monitor_and_record_resource_usage(
     output_csv,
     concurrency=1,
     use_vegeta=False,
-    include_pss=True,
+    include_pss=False,
     config=CONFIG
 ):
     stop_event = ThreadEvent()
@@ -438,9 +437,9 @@ def monitor_and_record_resource_usage(
 # ================== BENCHMARK MODES ==================
 def benchmark_throughput_latency(scenario, wasmcloud_bin, provider_reference, url=URL, config=CONFIG):
     setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
-    for size in PAYLOAD_SIZES:
-        bench_path = BENCH_DIR_TEMPLATE.format(size)
-        for run_id in range(1, NUM_OF_RUNS + 1):
+    for run_id in range(1, NUM_OF_RUNS + 1):  # Iterate over runs first
+        for size in PAYLOAD_SIZES:
+            bench_path = BENCH_DIR_TEMPLATE.format(size)
             print(f"Running scenario={scenario} size={size} run={run_id}")
             setup_benchmark_components_and_links(scenario, bench_path)
             warm_up(url)
@@ -454,11 +453,11 @@ def benchmark_throughput_latency(scenario, wasmcloud_bin, provider_reference, ur
     shutdown_scenario_env(scenario)
 
 
-def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, request_rate=10, url=URL, config=CONFIG):
+def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, request_rate=80, url=URL, config=CONFIG):
     setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
-    for size in PAYLOAD_SIZES:
-        bench_path = BENCH_DIR_TEMPLATE.format(size)
-        for run_id in range(1, NUM_OF_RUNS + 1):
+    for run_id in range(1, NUM_OF_RUNS + 1):  # Iterate over runs first
+        for size in PAYLOAD_SIZES:
+            bench_path = BENCH_DIR_TEMPLATE.format(size)
             print(f"Resource profiling scenario={scenario} size={size} run={run_id}")
             setup_benchmark_components_and_links(scenario, bench_path)
             warm_up(url)
@@ -473,6 +472,7 @@ def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, reques
                 request_rate=request_rate,
                 concurrency=1,
                 output_csv=RESOURCE_VS_PAYLOAD_SIZE_CSV,
+                use_vegeta=True,
                 config=CONFIG
             )
             stop_benchmark_components_and_remove_links(scenario)
@@ -482,9 +482,9 @@ def benchmark_resource_usage(scenario, wasmcloud_bin, provider_reference, reques
 
 def benchmark_baseline_latency(scenario, wasmcloud_bin, provider_reference, request_rate=10, url=URL, config=CONFIG):
     setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
-    for size in PAYLOAD_SIZES:
-        bench_path = BENCH_DIR_TEMPLATE.format(size)
-        for run_id in range(1, NUM_OF_RUNS + 1):
+    for run_id in range(1, NUM_OF_RUNS + 1):  # Iterate over runs first
+        for size in PAYLOAD_SIZES:
+            bench_path = BENCH_DIR_TEMPLATE.format(size)
             setup_benchmark_components_and_links(scenario, bench_path)
             warm_up(url)
 
@@ -512,10 +512,14 @@ def benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, provider_referen
     sizes = ["0K", "512K"]
     setup_scenario_env(scenario, wasmcloud_bin, provider_reference)
 
+    TARGET_TOTAL_REQUESTS = 10000  # Define a target total number of requests
+
     for size in sizes:
         bench_path = BENCH_DIR_TEMPLATE.format(size)
         for request_rate in REQUEST_RATES:
-            for run_id in range(1, NUM_OF_RUNS + 1):
+            # Calculate the number of runs to normalize total requests
+            num_of_runs = max(1, TARGET_TOTAL_REQUESTS // (request_rate * int(REQUESTS_SENDING_DURATION[:-1])))
+            for run_id in range(1, num_of_runs + 1):
                 print(f"Resource vs Request Rate scenario={scenario} size={size} request_rate={request_rate} run={run_id}")
                 setup_benchmark_components_and_links(scenario, bench_path)
                 warm_up(url)
@@ -549,15 +553,15 @@ def main():
     CONFIG["save_load_generator_output"] = args.save_load_generator_output
 
     # Clear existing CSV
-    for f in [THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV, BASELINE_LATENCY_CSV, RESOURCE_VS_PAYLOAD_SIZE_CSV, RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV, HEY_DEBUG_LOG, VEGETA_DEBUG_LOG]:
-        if os.path.exists(f):
-            os.remove(f)
+    #for f in [THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV, BASELINE_LATENCY_CSV, RESOURCE_VS_PAYLOAD_SIZE_CSV, RESOURCE_AND_LATENCY_VS_REQUEST_RATE_CSV, HEY_DEBUG_LOG, VEGETA_DEBUG_LOG]:
+    #    if os.path.exists(f):
+    #        os.remove(f)
 
     for scenario, wasmcloud_bin in [("nats", WASMCLOUD_NATS), ("composed", WASMCLOUD_NATS), ("bypass", WASMCLOUD_BYPASS)]:
         #benchmark_baseline_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
-        #benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        benchmark_throughput_latency(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
         #benchmark_resource_usage(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
-        benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
+        #benchmark_resource_vs_request_rate(scenario, wasmcloud_bin, HTTP_PROVIDER_REFERENCE, url=URL, config=CONFIG)
 
 
 if __name__ == "__main__":

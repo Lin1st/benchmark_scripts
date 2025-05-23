@@ -167,7 +167,7 @@ def plot_baseline_and_combined(baseline_df, stress_df):
 
 
 # CPU and Memory Usage
-def plot_resource_usage(resource_df, include_pss=True):
+def plot_resource_usage(resource_df, include_pss=False):
     # Normalize column names to ensure case consistency
     resource_df.columns = resource_df.columns.str.strip().str.lower()
 
@@ -227,7 +227,7 @@ def plot_resource_usage(resource_df, include_pss=True):
     )
 
 
-def plot_resource_vs_request_rate(resource_vs_request_rate_df, include_pss=True):
+def plot_resource_vs_request_rate(resource_vs_request_rate_df, include_pss=False):
     # Normalize column names to ensure case consistency
     resource_vs_request_rate_df.columns = resource_vs_request_rate_df.columns.str.strip().str.lower()
 
@@ -306,9 +306,9 @@ def plot_latency_vs_request_rate(resource_vs_request_rate_df):
 
 # ========================= MAIN =========================
 def main():
-    #df = pd.read_csv(THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV )
-    #plot_throughput(df)
-    #plot_latency_under_stress(df)
+    df = pd.read_csv(THROUGHPUT_AND_LATENCY_VS_PAYLOAD_SIZE_UNDER_LOAD_CSV )
+    plot_throughput(df)
+    plot_latency_under_stress(df)
 
     if os.path.exists(BASELINE_LATENCY_CSV):
         baseline_df = pd.read_csv(BASELINE_LATENCY_CSV)
